@@ -1,125 +1,67 @@
-import os, telebot, requests, yt_dlp, sqlite3, asyncio
+import telebot
 from telebot import types
-from flask import Flask
-from threading import Thread
+import os, asyncio, yt_dlp, time, threading
 import edge_tts
+import imageio_ffmpeg as ffmpeg
+import subprocess
 
-# ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-
-SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-
 bot = telebot.TeleBot(BOT_TOKEN)
-app = Flask(__name__)
+
+CHANNEL = -1003877967882
+OWNER_ID = int(os.getenv("ADMIN_ID"))
 
 user_state = {}
 user_voice = {}
 
-# ================= DATABASE =================
-conn = sqlite3.connect("bot.db", check_same_thread=False)
-cursor = conn.cursor()
+# ================= USERS =================
+def save_user(uid):
+    if not os.path.exists("users.txt"):
+        open("users.txt","w").close()
+    users = open("users.txt").read().splitlines()
+    if str(uid) not in users:
+        open("users.txt","a").write(str(uid)+"\n")
 
-cursor.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY)")
-cursor.execute("CREATE TABLE IF NOT EXISTS likes(track TEXT, count INTEGER)")
-conn.commit()
+def get_users():
+    if not os.path.exists("users.txt"):
+        return []
+    return open("users.txt").read().splitlines()
 
-# ================= WEB =================
-@app.route("/")
-def home():
-    cursor.execute("SELECT COUNT(*) FROM users")
-    users = cursor.fetchone()[0]
+# ================= MENU =================
+def main_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("🎤 Text → Voice","🎬 Video → MP3")
+    kb.add("🎧 Search Music","🔵 Circle Video")
+    return kb
 
-    cursor.execute("SELECT * FROM likes ORDER BY count DESC LIMIT 5")
-    top = cursor.fetchall()
+def voice_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("👨 Erkak ovoz","👩 Ayol ovoz")
+    kb.add("🔙 Orqaga")
+    return kb
 
-    html = f"<h1>BOT LIVE</h1><p>Users: {users}</p>"
-    for t in top:
-        html += f"<p>{t[0]} ❤️ {t[1]}</p>"
-
-    return html
-
-def run_web():
-    app.run(host="0.0.0.0", port=10000)
-
-# ================= SPOTIFY =================
-def get_token():
-    res = requests.post(
-        "https://accounts.spotify.com/api/token",
-        data={"grant_type":"client_credentials"},
-        auth=(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
-    )
-    return res.json().get("access_token")
-
-def search_spotify(q):
-    token = get_token()
-    headers = {"Authorization":f"Bearer {token}"}
-    res = requests.get(
-        f"https://api.spotify.com/v1/search?q={q}&type=track&limit=1",
-        headers=headers
-    ).json()
-
-    if "tracks" not in res or not res["tracks"]["items"]:
-        return None
-
-    t = res["tracks"]["items"][0]
-
-    return {
-        "name": t["name"],
-        "artist": t["artists"][0]["name"],
-        "image": t["album"]["images"][0]["url"]
-    }
-
-# ================= DOWNLOAD =================
-def download_audio(q, cid):
-    try:
-        ydl_opts = {
-            'format':'bestaudio',
-            'outtmpl':f'{cid}.%(ext)s',
-            'quiet':True,
-            'postprocessors':[{'key':'FFmpegExtractAudio','preferredcodec':'mp3'}]
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(f"ytsearch1:{q}", download=True)
-
-        file = f"{cid}.mp3"
-        bot.send_audio(cid, open(file,'rb'))
-        os.remove(file)
-    except:
-        bot.send_message(cid,"❌ Yuklab bo‘lmadi")
-
-# ================= TTS =================
-async def tts(text, file, voice):
-    com = edge_tts.Communicate(text=text, voice=voice)
-    await com.save(file)
+def admin_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("📢 Broadcast","📊 Statistika")
+    kb.add("📣 Auto Post")
+    kb.add("🔙 Orqaga")
+    return kb
 
 # ================= START =================
 @bot.message_handler(commands=['start'])
 def start(m):
-    cid = m.chat.id
-
-    cursor.execute("INSERT OR IGNORE INTO users VALUES(?)",(cid,))
-    conn.commit()
-
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("🎵 Music","🎤 Voice")
-    kb.add("🎥 Video","📊 Stat")
-
-    bot.send_message(cid,"Tanlang 👇",reply_markup=kb)
+    save_user(m.chat.id)
+    user_state[m.chat.id] = None
+    bot.send_message(m.chat.id,"🔥 BOTGA XUSH KELIBSIZ",reply_markup=main_menu())
 
 # ================= ADMIN =================
 @bot.message_handler(commands=['admin'])
 def admin(m):
-    if m.chat.id != ADMIN_ID:
-        return
+    if m.from_user.id == OWNER_ID:
+        user_state[m.chat.id] = "admin"
+        bot.send_message(m.chat.id,"⚙️ Admin panel",reply_markup=admin_menu())
 
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("📢 Broadcast","📊 Stat")
-    kb.add("🔙 Orqaga")
-
-    user_state[m.chat.id] = "admin"
-    bot.send_message(m.chat.id,"Admin panel",reply_markup=kb)
+AUTO_POST_TEXT = None
 
 # ================= TEXT =================
 @bot.message_handler(content_types=['text'])
@@ -131,101 +73,154 @@ def text(m):
     # ORQAGA
     if txt == "🔙 Orqaga":
         user_state[cid] = None
-        start(m)
+        bot.send_message(cid,"Menu",reply_markup=main_menu())
         return
 
-    # STAT
-    if txt == "📊 Stat":
-        cursor.execute("SELECT COUNT(*) FROM users")
-        bot.send_message(cid,f"👥 Users: {cursor.fetchone()[0]}")
-        return
+    # ADMIN
+    if state == "admin":
+        if txt == "📊 Statistika":
+            bot.send_message(cid,f"👥 {len(get_users())}")
+            return
 
-    # ADMIN BROADCAST
-    if state == "admin" and txt == "📢 Broadcast":
-        user_state[cid] = "broadcast"
-        bot.send_message(cid,"Post yubor (text/rasm/video)")
-        return
+        if txt == "📢 Broadcast":
+            user_state[cid] = "broadcast"
+            bot.send_message(cid,"Post yubor")
+            return
+
+        if txt == "📣 Auto Post":
+            user_state[cid] = "autopost"
+            bot.send_message(cid,"Post yubor")
+            return
 
     if state == "broadcast":
-        users = cursor.execute("SELECT id FROM users").fetchall()
-        for u in users:
+        for u in get_users():
             try:
-                bot.copy_message(u[0], cid, m.message_id)
+                bot.copy_message(u, cid, m.message_id)
             except:
                 pass
         bot.send_message(cid,"✅ Yuborildi")
         user_state[cid] = "admin"
         return
 
-    # VOICE
-    if txt == "🎤 Voice":
-        kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add("👨 Erkak","👩 Ayol")
-        kb.add("🔙 Orqaga")
-
-        user_state[cid] = "voice"
-        bot.send_message(cid,"Tanlang",reply_markup=kb)
+    if state == "autopost":
+        global AUTO_POST_TEXT
+        AUTO_POST_TEXT = txt
+        bot.send_message(cid,"✅ Saqlandi")
+        user_state[cid] = "admin"
         return
 
-    if txt in ["👨 Erkak","👩 Ayol"]:
+    # VOICE
+    if txt == "🎤 Text → Voice":
+        user_state[cid] = "voice"
+        bot.send_message(cid,"Tanla",reply_markup=voice_menu())
+        return
+
+    if txt in ["👨 Erkak ovoz","👩 Ayol ovoz"]:
         user_voice[cid] = "male" if "Erkak" in txt else "female"
         user_state[cid] = "tts"
         bot.send_message(cid,"Matn yoz")
         return
 
     if state == "tts":
-        voice = "uz-UZ-SardorNeural" if user_voice[cid]=="male" else "uz-UZ-MadinaNeural"
-        file = f"{cid}.mp3"
-        asyncio.run(tts(txt,file,voice))
-        bot.send_voice(cid,open(file,'rb'))
-        os.remove(file)
-        user_state[cid]=None
+        try:
+            voice = "uz-UZ-SardorNeural" if user_voice.get(cid)=="male" else "uz-UZ-MadinaNeural"
+            file = f"{cid}.mp3"
+
+            async def run():
+                communicate = edge_tts.Communicate(text=txt, voice=voice)
+                await communicate.save(file)
+
+            asyncio.run(run())
+
+            bot.send_voice(cid, open(file,"rb"))
+            os.remove(file)
+
+        except Exception as e:
+            bot.send_message(cid,f"❌ {e}")
         return
 
-    # MUSIC
-    if txt == "🎵 Music":
+    # MODES
+    if txt == "🎬 Video → MP3":
+        user_state[cid] = "mp3"
+        bot.send_message(cid,"Video yubor")
+        return
+
+    if txt == "🔵 Circle Video":
+        user_state[cid] = "circle"
+        bot.send_message(cid,"Video yubor")
+        return
+
+    if txt == "🎧 Search Music":
         user_state[cid] = "music"
         bot.send_message(cid,"Qo‘shiq nomi")
         return
 
+    # MUSIC
     if state == "music":
-        sp = search_spotify(txt)
-        if sp:
-            bot.send_photo(cid,sp["image"],caption=f"{sp['name']} - {sp['artist']}")
-        download_audio(txt,cid)
-        user_state[cid]=None
-        return
+        try:
+            bot.send_message(cid,"🔍 Qidirilmoqda...")
 
-    # VIDEO MODE
-    if txt == "🎥 Video":
-        user_state[cid] = "video"
-        bot.send_message(cid,"Video yubor")
-        return
+            ydl_opts = {
+                'format': 'bestaudio',
+                'outtmpl': f'{cid}.%(ext)s',
+                'quiet': True,
+                'noplaylist': True,
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f"ytsearch1:{txt}", download=True)
+                file = ydl.prepare_filename(info['entries'][0])
+
+            bot.send_audio(cid, open(file,"rb"))
+            os.remove(file)
+
+        except Exception as e:
+            bot.send_message(cid,f"❌ Topilmadi")
+        finally:
+            user_state[cid] = None
 
 # ================= VIDEO =================
 @bot.message_handler(content_types=['video'])
 def video(m):
     cid = m.chat.id
+    state = user_state.get(cid)
 
     file = bot.get_file(m.video.file_id)
     data = bot.download_file(file.file_path)
 
-    open("v.mp4","wb").write(data)
+    inp = f"{cid}.mp4"
+    open(inp,"wb").write(data)
 
-    bot.send_message(cid,"⏳ Processing...")
+    ffmpeg_path = ffmpeg.get_ffmpeg_exe()
 
-    os.system("ffmpeg -i v.mp4 -vf crop='min(in_w,in_h):min(in_w,in_h)',scale=240:240 c.mp4")
-    os.system("ffmpeg -i v.mp4 -q:a 0 -map a a.mp3")
+    try:
+        if state == "mp3":
+            out = f"{cid}.mp3"
+            subprocess.run([ffmpeg_path,"-y","-i",inp,out])
+            bot.send_audio(cid, open(out,"rb"))
+            os.remove(out)
 
-    bot.send_video_note(cid,open("c.mp4","rb"))
-    bot.send_audio(cid,open("a.mp3","rb"))
+        elif state == "circle":
+            out = f"{cid}_c.mp4"
+            subprocess.run([
+                ffmpeg_path,"-y","-i",inp,
+                "-vf","crop='min(in_w,in_h)':'min(in_w,in_h)',scale=240:240",
+                out
+            ])
+            bot.send_video_note(cid, open(out,"rb"))
+            os.remove(out)
 
-    os.remove("v.mp4")
-    os.remove("c.mp4")
-    os.remove("a.mp3")
+    except Exception as e:
+        bot.send_message(cid,f"❌ {e}")
+
+    os.remove(inp)
+    user_state[cid] = None
 
 # ================= RUN =================
-if __name__ == "__main__":
-    Thread(target=run_web).start()
-    print("🚀 ISHLAYAPTI...")
-    bot.infinity_polling()
+while True:
+    try:
+        print("🔥 FINAL BOT ISHLAYAPTI")
+        bot.infinity_polling(skip_pending=True)
+    except Exception as e:
+        print("XATO:", e)
+        time.sleep(5)
