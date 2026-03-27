@@ -1,6 +1,4 @@
 pyTelegramBotAPI
 yt-dlp
 edge-tts
-python-dotenv
-flask
-requests
+imageio-ffmpeg
