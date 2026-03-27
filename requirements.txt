@@ -3,3 +3,4 @@ yt-dlp
 edge-tts
 python-dotenv
 flask
+requests
