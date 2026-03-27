@@ -1,11 +1,23 @@
-# ================= WEB =================
-from flask import Flask, request
+# ================= WEB KEEP ALIVE =================
+from flask import Flask
 from threading import Thread
-import requests, base64, time, os, subprocess, asyncio, yt_dlp, zipfile
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot ishlayapti"
+
+def run_web():
+    app.run(host='0.0.0.0', port=10000)
+
+Thread(target=run_web).start()
+
+# ================= IMPORT =================
 import telebot
 from telebot import types
+import os, yt_dlp, time, subprocess, requests, base64, asyncio
 import edge_tts
-from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,12 +25,16 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 
 bot = telebot.TeleBot(BOT_TOKEN)
-executor = ThreadPoolExecutor(max_workers=50)
 
-app = Flask(__name__)
+# ================= CONFIG =================
+OWNER_ID = 7171330738
+CHANNEL = -1003877967882
+
+user_state = {}
+user_voice = {}
+user_music_cache = {}
 
 # ================= USERS =================
 def save_user(uid):
@@ -33,170 +49,223 @@ def get_users():
         return []
     return open("users.txt").read().splitlines()
 
-# ================= FFMPEG =================
-def setup_ffmpeg():
-    if not os.path.exists("ffmpeg"):
-        url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-        r = requests.get(url)
-        open("ffmpeg.zip","wb").write(r.content)
+# ================= SUB =================
+def check_sub(user_id):
+    try:
+        m = bot.get_chat_member(CHANNEL, user_id)
+        return m.status in ["member","creator","administrator"]
+    except:
+        return False
 
-        with zipfile.ZipFile("ffmpeg.zip",'r') as z:
-            z.extractall("ffmpeg")
+def sub_kb():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("📢 Obuna", url="https://t.me/meliboyevdev"))
+    kb.add(types.InlineKeyboardButton("✅ Tekshirish", callback_data="check"))
+    return kb
 
-    for root, dirs, files in os.walk("ffmpeg"):
-        if "ffmpeg.exe" in files or "ffmpeg" in files:
-            os.environ["PATH"] += os.pathsep + root
-            break
+# ================= MENU =================
+def main_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("🎤 Text → Voice","🎬 Video → MP3")
+    kb.add("🎧 Search Music","🔵 Circle Video")
+    kb.add("🔙 Orqaga")
+    return kb
 
-setup_ffmpeg()
+def voice_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("👨 Erkak ovoz","👩 Ayol ovoz")
+    kb.add("🔙 Orqaga")
+    return kb
+
+def admin_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("📢 Broadcast","📊 Statistika")
+    kb.add("🔙 Orqaga")
+    return kb
 
 # ================= SPOTIFY =================
 def get_spotify_token():
     auth = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
     headers = {"Authorization": f"Basic {auth}"}
     data = {"grant_type": "client_credentials"}
-
     r = requests.post("https://accounts.spotify.com/api/token", headers=headers, data=data)
     return r.json().get("access_token")
 
 def search_spotify(query):
     token = get_spotify_token()
     headers = {"Authorization": f"Bearer {token}"}
+    url = f"https://api.spotify.com/v1/search?q={query}&type=track&limit=1"
+    r = requests.get(url, headers=headers).json()
 
-    r = requests.get(f"https://api.spotify.com/v1/search?q={query}&type=track&limit=1", headers=headers)
-    data = r.json()
-
-    if not data["tracks"]["items"]:
-        return None
-
-    track = data["tracks"]["items"][0]
+    track = r["tracks"]["items"][0]
     return {
-        "name": track["name"],
+        "title": track["name"],
         "artist": track["artists"][0]["name"],
-        "duration": int(track["duration_ms"]/1000),
         "image": track["album"]["images"][0]["url"],
-        "url": track["external_urls"]["spotify"]
+        "duration": track["duration_ms"] // 1000
     }
 
-# ================= ADMIN PANEL =================
-@app.route("/")
-def home():
-    return "Bot ishlayapti 🚀"
+# ================= VOICE =================
+async def tts(text, file, voice):
+    communicate = edge_tts.Communicate(text=text, voice=voice)
+    await communicate.save(file)
 
-@app.route("/admin")
-def admin_panel():
-    token = request.args.get("token")
-    if token != ADMIN_TOKEN:
-        return "❌ Access denied"
-
-    users = get_users()
-    return f"""
-    <h1>Dashboard</h1>
-    <p>Users: {len(users)}</p>
-    <form action="/broadcast" method="post">
-    <input name="msg">
-    <input name="token" value="{ADMIN_TOKEN}" hidden>
-    <button>Send</button>
-    </form>
-    """
-
-@app.route("/broadcast", methods=["POST"])
-def broadcast():
-    if request.form.get("token") != ADMIN_TOKEN:
-        return "❌ error"
-
-    msg = request.form.get("msg")
-
-    for u in get_users():
-        try:
-            bot.send_message(u, msg)
-        except:
-            pass
-
-    return "✅ sent"
-
-def run_web():
-    app.run(host='0.0.0.0', port=10000)
-
-Thread(target=run_web).start()
-
-# ================= FUNCTIONS =================
-def run_async(func,*args):
-    executor.submit(func,*args)
-
-def tts(cid,text,voice):
-    file=f"{cid}.mp3"
-
-    async def run():
-        t= edge_tts.Communicate(text=text,voice=voice)
-        await t.save(file)
-
-    asyncio.run(run())
-    bot.send_voice(cid,open(file,"rb"))
-    os.remove(file)
-
-def convert_mp3(inp,out):
-    subprocess.call(f'ffmpeg -y -i "{inp}" "{out}"',shell=True)
-
-def convert_circle(inp,out):
-    subprocess.call(f'ffmpeg -y -i "{inp}" -vf scale=240:240 "{out}"',shell=True)
-
-# ================= BOT =================
+# ================= START =================
 @bot.message_handler(commands=['start'])
 def start(m):
-    save_user(m.chat.id)
-    bot.send_message(m.chat.id,"🔥 Botga xush kelibsiz")
+    cid = m.chat.id
+    save_user(cid)
+    user_state[cid] = None
 
+    if not check_sub(m.from_user.id):
+        bot.send_message(cid,"❗ Obuna bo‘ling",reply_markup=sub_kb())
+        return
+
+    bot.send_message(cid,"🔥 Xush kelibsiz",reply_markup=main_menu())
+
+# ================= ADMIN =================
+@bot.message_handler(commands=['admin'])
+def admin(m):
+    if m.from_user.id == OWNER_ID:
+        user_state[m.chat.id] = "admin"
+        bot.send_message(m.chat.id,"⚙️ Admin panel",reply_markup=admin_menu())
+
+# ================= TEXT =================
 @bot.message_handler(content_types=['text'])
 def text(m):
-    cid=m.chat.id
-    txt=m.text
+    cid = m.chat.id
+    txt = m.text
+    state = user_state.get(cid)
 
-    if txt=="🎤":
+    if txt == "🔙 Orqaga":
+        user_state[cid] = None
+        bot.send_message(cid,"Menu",reply_markup=main_menu())
+        return
+
+    # VOICE MENU
+    if txt == "🎤 Text → Voice":
+        user_state[cid] = "voice"
+        bot.send_message(cid,"Tanla",reply_markup=voice_menu())
+        return
+
+    if txt in ["👨 Erkak ovoz","👩 Ayol ovoz"]:
+        user_voice[cid] = "male" if "Erkak" in txt else "female"
+        user_state[cid] = "tts"
         bot.send_message(cid,"Matn yoz")
         return
 
-    if txt=="🎧":
-        res=search_spotify(txt)
+    if state == "tts":
+        voice = "uz-UZ-SardorNeural" if user_voice.get(cid)=="male" else "uz-UZ-MadinaNeural"
+        file = f"{cid}.mp3"
+        asyncio.run(tts(txt, file, voice))
 
-        if not res:
-            bot.send_message(cid,"Topilmadi")
-            return
+        bot.send_voice(cid, open(file,"rb"))
+        os.remove(file)
 
-        msg=f"""
-🎵 {res['name']}
-👤 {res['artist']}
-⏱ {res['duration']} sec
-"""
+        user_state[cid] = None
+        bot.send_message(cid,"✅ Tayyor",reply_markup=main_menu())
+        return
 
-        bot.send_photo(cid,res['image'],caption=msg)
+    # MUSIC
+    if txt == "🎧 Search Music":
+        user_state[cid] = "music"
+        bot.send_message(cid,"Qo‘shiq nomi")
+        return
 
-    else:
-        run_async(tts,cid,txt,"uz-UZ-SardorNeural")
+    if state == "music":
+        data = search_spotify(txt)
 
+        msg = f"🎵 {data['title']}\n👤 {data['artist']}\n⏱ {data['duration']} sec"
+        bot.send_photo(cid, data['image'], caption=msg)
+
+        with yt_dlp.YoutubeDL({'quiet':True}) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{txt}", download=False)
+            url = f"https://youtube.com/watch?v={info['entries'][0]['id']}"
+
+        user_music_cache[cid] = url
+
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("⬇️ Yuklash", callback_data="dl"))
+        bot.send_message(cid,"Yuklash:",reply_markup=kb)
+
+        user_state[cid] = None
+        return
+
+    # VIDEO TO MP3
+    if txt == "🎬 Video → MP3":
+        user_state[cid] = "mp3"
+        bot.send_message(cid,"Video yubor")
+        return
+
+    # CIRCLE
+    if txt == "🔵 Circle Video":
+        user_state[cid] = "circle"
+        bot.send_message(cid,"Video yubor")
+        return
+
+    # ADMIN
+    if state == "admin":
+        if txt == "📊 Statistika":
+            bot.send_message(cid,f"👥 {len(get_users())}")
+        elif txt == "📢 Broadcast":
+            user_state[cid] = "broadcast"
+            bot.send_message(cid,"Post yubor")
+        return
+
+    if state == "broadcast":
+        for u in get_users():
+            try:
+                bot.copy_message(u, cid, m.message_id)
+            except:
+                pass
+        bot.send_message(cid,"✅ Yuborildi")
+        user_state[cid] = "admin"
+
+# ================= CALLBACK =================
+@bot.callback_query_handler(func=lambda c: True)
+def cb(c):
+    cid = c.message.chat.id
+
+    if c.data == "dl":
+        url = user_music_cache.get(cid)
+
+        file = f"{cid}.mp3"
+        ydl_opts = {
+            'format':'bestaudio',
+            'outtmpl': file,
+            'postprocessors':[{'key':'FFmpegExtractAudio','preferredcodec':'mp3'}]
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        bot.send_audio(cid, open(file,"rb"))
+        os.remove(file)
+
+# ================= VIDEO =================
 @bot.message_handler(content_types=['video'])
 def video(m):
-    cid=m.chat.id
+    cid = m.chat.id
+    state = user_state.get(cid)
 
-    file=bot.get_file(m.video.file_id)
-    data=bot.download_file(file.file_path)
+    file = bot.get_file(m.video.file_id)
+    data = bot.download_file(file.file_path)
 
-    inp=f"{cid}.mp4"
+    inp = f"{cid}.mp4"
     open(inp,"wb").write(data)
 
-    out=f"{cid}.mp3"
-    convert_mp3(inp,out)
+    if state == "mp3":
+        out = f"{cid}.mp3"
+        subprocess.run(["ffmpeg","-i",inp,out])
+        bot.send_audio(cid, open(out,"rb"))
+        os.remove(out)
 
-    bot.send_audio(cid,open(out,"rb"))
-
-    circ=f"{cid}_c.mp4"
-    convert_circle(inp,circ)
-
-    bot.send_video_note(cid,open(circ,"rb"))
+    elif state == "circle":
+        bot.send_video_note(cid, open(inp,"rb"))
 
     os.remove(inp)
-    os.remove(out)
-    os.remove(circ)
+    user_state[cid] = None
 
-print("🚀 ISHLAYAPTI")
+# ================= RUN =================
+print("🔥 BOT ISHLADI")
 bot.infinity_polling()
