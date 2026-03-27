@@ -1,5 +1,5 @@
 pyTelegramBotAPI
+requests
 yt-dlp
-edge-tts
-python-dotenv
 flask
+edge-tts
