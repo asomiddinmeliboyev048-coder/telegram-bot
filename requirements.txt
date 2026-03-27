@@ -1,6 +1,4 @@
 pyTelegramBotAPI
-requests
 yt-dlp
-ffmpeg-python
+edge-tts
 imageio-ffmpeg
-gTTS
