@@ -25,7 +25,7 @@ def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-threading.Thread(target=run_web).start()
+threading.Thread(target=run_web, daemon=True).start()
 # =====================================================
 
 # ================= USERS =================
@@ -270,13 +270,13 @@ def auto_post_loop():
                     pass
         time.sleep(3600)
 
-threading.Thread(target=auto_post_loop).start()
+threading.Thread(target=auto_post_loop, daemon=True).start()
 
 # ================= RUN =================
 while True:
     try:
         print("🔥 BOT ISHLAYAPTI...")
-        bot.infinity_polling(skip_pending=True)
+        bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=60)
     except Exception as e:
         print("XATO:", e)
         time.sleep(5)
