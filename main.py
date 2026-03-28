@@ -3,6 +3,7 @@ from telebot import types
 import os, subprocess, asyncio, time, threading
 import yt_dlp
 import edge_tts
+from flask import Flask
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -12,6 +13,20 @@ OWNER_ID = 7171330738
 
 user_state = {}
 user_voice = {}
+
+# ================= FLASK (RENDER FIX) =================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_web).start()
+# =====================================================
 
 # ================= USERS =================
 def save_user(uid):
@@ -106,7 +121,6 @@ def text(m):
         bot.send_message(cid,"Menu",reply_markup=main_menu())
         return
 
-    # TEXT → VOICE
     if txt == "🎤 Text → Voice":
         user_state[cid] = "choose_voice"
         bot.send_message(cid,"Ovoz tanlang",reply_markup=voice_menu())
@@ -136,7 +150,6 @@ def text(m):
             bot.send_message(cid,f"❌ {e}")
         return
 
-    # ADMIN
     if txt == "📊 Statistika" and m.from_user.id == OWNER_ID:
         bot.send_message(cid,f"👥 Userlar: {len(get_users())}")
         return
@@ -172,7 +185,6 @@ def text(m):
         user_state[cid] = None
         return
 
-    # MODES
     if txt == "🎬 Video → MP3":
         user_state[cid] = "mp3"
         bot.send_message(cid,"Video yubor")
@@ -188,7 +200,6 @@ def text(m):
         bot.send_message(cid,"Video yubor")
         return
 
-    # MUSIC (FIXED)
     if state == "music":
         try:
             bot.send_message(cid,"🔍 Qidirilmoqda...")
