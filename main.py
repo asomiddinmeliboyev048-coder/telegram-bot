@@ -830,28 +830,28 @@ async def handle_music_search(m):
             duration = format_duration(track['duration'])
             result_text += f"{i}. {artist} - {name} `[{duration}]`\n"
 
-        # Create inline keyboard with numbers 1-10 - VALIDATED (no empty rows)
+        # Create inline keyboard with numbers 1-10 - Tingla Bot style
         keyboard_rows = []
 
-        # Row 1: buttons 1-5
+        # Row 1: buttons 1-5 with Spotify URL in callback_data
         if len(tracks) >= 1:
-            row1 = [types.InlineKeyboardButton(str(i), callback_data=f"music:{tracks[i-1]['id']}:{i}") for i in range(1, min(6, len(tracks)+1))]
-            if row1:  # Extra check to ensure no empty row
+            row1 = [types.InlineKeyboardButton(str(i), callback_data=f"dl_{tracks[i-1]['spotify_url']}") for i in range(1, min(6, len(tracks)+1))]
+            if row1:
                 keyboard_rows.append(row1)
 
-        # Row 2: buttons 6-10 (if available)
+        # Row 2: buttons 6-10 with Spotify URL (if available)
         if len(tracks) >= 6:
-            row2 = [types.InlineKeyboardButton(str(i), callback_data=f"music:{tracks[i-1]['id']}:{i}") for i in range(6, min(11, len(tracks)+1))]
-            if row2:  # Extra check to ensure no empty row
+            row2 = [types.InlineKeyboardButton(str(i), callback_data=f"dl_{tracks[i-1]['spotify_url']}") for i in range(6, min(11, len(tracks)+1))]
+            if row2:
                 keyboard_rows.append(row2)
 
-        # Row 3: Navigation buttons (ALWAYS present, never empty)
+        # Row 3: Navigation buttons (ALWAYS present)
         keyboard_rows.append([
             types.InlineKeyboardButton("⬅️ Orqaga", callback_data="music:back"),
             types.InlineKeyboardButton("❌ Yopish", callback_data="music:close")
         ])
 
-        # CRITICAL: Verify keyboard is not empty before creating markup
+        # CRITICAL: Verify keyboard is not empty
         if not keyboard_rows or all(len(row) == 0 for row in keyboard_rows):
             logger.error(f"Empty keyboard detected for user {cid}!")
             await bot.edit_message_text(
@@ -863,9 +863,8 @@ async def handle_music_search(m):
 
         markup = types.InlineKeyboardMarkup(keyboard_rows)
 
-        # Store tracks data in user context (temporary)
-        user_state[cid + '_tracks'] = tracks
-        user_state[cid + '_query'] = query
+        # Store minimal track data for quick lookup
+        user_state[cid + '_tracks'] = {t['spotify_url']: t for t in tracks}
 
         await bot.edit_message_text(
             result_text,
@@ -878,9 +877,9 @@ async def handle_music_search(m):
         logger.error(f"Music search error: {e}")
         await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("music:"))
-async def music_callback_handler(call):
-    """Handle music selection from inline keyboard"""
+@bot.callback_query_handler(func=lambda c: c.data.startswith("dl_"))
+async def download_spotify_url_handler(call):
+    """Handle download from Spotify URL - Tingla Bot style"""
     cid = call.message.chat.id
     data = call.data
     msg_id = call.message.message_id
@@ -888,7 +887,50 @@ async def music_callback_handler(call):
     try:
         await bot.answer_callback_query(call.id)
 
-        # Handle navigation buttons
+        # Extract Spotify URL from callback_data
+        spotify_url = data[3:]  # Remove "dl_" prefix
+
+        # Get track info from stored data
+        tracks_dict = user_state.get(cid + '_tracks', {})
+        track = tracks_dict.get(spotify_url)
+
+        if not track:
+            # If not in memory, create basic info from URL
+            track_id = spotify_url.split('/')[-1].split('?')[0]
+            track = {
+                'id': track_id,
+                'spotify_url': spotify_url,
+                'name': 'Track',
+                'artist': 'Unknown',
+                'duration': 0
+            }
+
+        # Update message to show loading
+        try:
+            await bot.edit_message_text(
+                f"🎵 {track['artist']} - {track['name']}\n\n⏳ Yuklanmoqda...",
+                cid, msg_id
+            )
+        except Exception:
+            pass
+
+        # Download using Spotify URL via yt-dlp
+        await download_from_spotify_url(cid, track, spotify_url, msg_id)
+
+    except Exception as e:
+        logger.error(f"Spotify URL download error: {e}")
+        await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
+
+@bot.callback_query_handler(func=lambda c: c.data in ["music:back", "music:close"])
+async def music_navigation_handler(call):
+    """Handle navigation buttons (Orqaga, Yopish)"""
+    cid = call.message.chat.id
+    data = call.data
+    msg_id = call.message.message_id
+
+    try:
+        await bot.answer_callback_query(call.id)
+
         if data == "music:back":
             await bot.edit_message_text("📋 Asosiy menu", cid, msg_id, reply_markup=main_menu())
             user_state[cid] = None
@@ -899,40 +941,8 @@ async def music_callback_handler(call):
             user_state[cid] = None
             return
 
-        # Handle music selection: music:{track_id}:{number}
-        parts = data.split(":")
-        if len(parts) >= 2:
-            track_id = parts[1]
-            track_num = parts[2] if len(parts) > 2 else "?"
-
-            # Get tracks from user context
-            tracks = user_state.get(cid + '_tracks', [])
-            track = None
-            for t in tracks:
-                if t['id'] == track_id:
-                    track = t
-                    break
-
-            if not track:
-                await bot.edit_message_text("❌ Qo'shiq ma'lumotlari topilmadi.", cid, msg_id)
-                return
-
-            # Update message to show loading (try/except to handle message not modified error)
-            try:
-                await bot.edit_message_text(
-                    f"🎵 {track['artist']} - {track['name']}\n\n⏳ Yuklanmoqda...",
-                    cid, msg_id
-                )
-            except Exception:
-                # If edit fails, try to send new message or continue
-                pass
-
-            # Download the track
-            await download_single_track(cid, track, msg_id)
-
     except Exception as e:
-        logger.error(f"Music callback error: {e}")
-        await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
+        logger.error(f"Navigation error: {e}")
 
 async def download_single_track(cid, track, msg_id):
     """Download single track from Spotify metadata"""
@@ -1067,6 +1077,143 @@ async def download_single_track(cid, track, msg_id):
 
         except Exception as e:
             logger.error(f"Download single track error: {e}")
+            await bot.edit_message_text(
+                "❌ Xatolik yuz berdi. Iltimos, boshqa qo'shiqni tanlang.",
+                cid, msg_id
+            )
+            safe_remove(file_path)
+
+async def download_from_spotify_url(cid, track, spotify_url, msg_id):
+    """Download track from Spotify URL using yt-dlp - Tingla Bot style"""
+    file_path = None
+    progress_data = {'percent': 0}
+    stop_event = asyncio.Event()
+
+    async with music_semaphore:
+        try:
+            # Progress updater
+            async def update_progress():
+                last_percent = -1
+                while not stop_event.is_set():
+                    try:
+                        percent = progress_data.get('percent', 0)
+                        if percent != last_percent and percent < 100:
+                            last_percent = percent
+                            try:
+                                await bot.edit_message_text(
+                                    f"🎵 {track['artist']} - {track['name']}\n⬇️ {percent}%",
+                                    cid, msg_id
+                                )
+                            except Exception:
+                                pass
+                        await asyncio.sleep(2)
+                    except Exception:
+                        break
+
+            # Progress hook for yt-dlp
+            def progress_hook(d):
+                if d['status'] == 'downloading':
+                    if 'downloaded_bytes' in d and 'total_bytes' in d and d['total_bytes']:
+                        progress_data['percent'] = int(d['downloaded_bytes'] / d['total_bytes'] * 100)
+                    elif 'downloaded_bytes' in d and 'total_bytes_estimate' in d:
+                        progress_data['percent'] = int(d['downloaded_bytes'] / d['total_bytes_estimate'] * 100)
+
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': os.path.join(TEMP_DIR, f'{cid}_%(title)s.%(ext)s'),
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+                'socket_timeout': 15,
+                'retries': 2,
+                'postprocessors': [
+                    {
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '128',
+                    }
+                ],
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                },
+                'progress_hooks': [progress_hook],
+            }
+
+            # Start progress updater
+            progress_task = asyncio.create_task(update_progress())
+
+            # Download from Spotify URL using yt-dlp (it can handle Spotify links via search)
+            # Actually use search since yt-dlp doesn't directly download from Spotify
+            search_query = f"{track['artist']} - {track['name']} official audio" if track['artist'] != 'Unknown' else spotify_url
+
+            info = None
+            sources = [
+                search_query,
+                f"ytsearch1:{track.get('artist', '')} {track.get('name', '')}",
+                f"scsearch1:{track.get('artist', '')} {track.get('name', '')}",
+            ]
+
+            for src in sources:
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = await run_in_thread(ydl.extract_info, src, download=True)
+                    if info:
+                        break
+                except Exception as e:
+                    logger.warning(f"Source failed {src}: {e}")
+                    continue
+
+            # Stop progress updater
+            stop_event.set()
+            try:
+                await progress_task
+            except Exception:
+                pass
+
+            if not info:
+                await bot.edit_message_text(
+                    "❌ Yuklab olishda xatolik. Iltimos, boshqa qo'shiqni tanlang.",
+                    cid, msg_id
+                )
+                return
+
+            # Find downloaded file
+            downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.mp3"))
+            if not downloaded_files:
+                downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.*"))
+
+            if not downloaded_files:
+                await bot.edit_message_text("❌ Fayl topilmadi.", cid, msg_id)
+                return
+
+            file_path = str(downloaded_files[0])
+
+            # Check file size
+            if os.path.getsize(file_path) > 50 * 1024 * 1024:
+                await bot.edit_message_text("❌ Fayl hajmi juda katta (>50MB).", cid, msg_id)
+                return
+
+            # Send audio
+            await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
+
+            with open(file_path, "rb") as f:
+                await bot.send_audio(
+                    cid,
+                    f,
+                    title=track.get('name', 'Track'),
+                    performer=track.get('artist', 'Unknown'),
+                    duration=track.get('duration', 0),
+                    caption=f"🟢 {track.get('artist', 'Unknown')} - {track.get('name', 'Track')}\n✅ @foyda1ii_bot",
+                    reply_markup=main_menu()
+                )
+
+            await bot.delete_message(cid, msg_id)
+
+            # Background cleanup
+            asyncio.create_task(background_cleanup(file_path))
+
+        except Exception as e:
+            logger.error(f"Download from URL error: {e}")
             await bot.edit_message_text(
                 "❌ Xatolik yuz berdi. Iltimos, boshqa qo'shiqni tanlang.",
                 cid, msg_id
@@ -1281,7 +1428,7 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             "-c:v", "libx264",
             "-preset", "ultrafast",      # Maximum speed preset
             "-tune", "zerolatency",       # Ultra-low latency mode (key for speed)
-            "-crf", "20",                # Lower CRF = better quality, still fast with ultrafast
+            "-crf", "28",                # Balanced quality/speed for fast processing
             "-threads", "0",              # ALL CPU cores
             "-c:a", "aac",
             "-b:a", "64k",               # Lower audio bitrate for speed
