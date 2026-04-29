@@ -740,28 +740,297 @@ async def download_music_async(cid, query, search_msg):
                 safe_remove(file_path)
 
 
-async def handle_music_search(m):
-    """Search and download music from YouTube - async with status updates"""
-    cid = m.chat.id
-    query = m.text
+def format_duration(seconds):
+    """Format seconds to mm:ss"""
+    if not seconds:
+        return "00:00"
+    minutes = seconds // 60
+    secs = seconds % 60
+    return f"{minutes:02d}:{secs:02d}"
+
+async def search_spotify_top10(query):
+    """Search Spotify for top 10 tracks"""
+    if not spotify_client:
+        return None
 
     try:
-        # Send initial message immediately (non-blocking)
-        search_msg = await bot.send_message(cid, "🔍 Qidirilmoqda...")
+        results = spotify_client.search(q=query, type='track', limit=10)
 
-        # Create background task for download
-        task = asyncio.create_task(download_music_async(cid, query, search_msg))
-        active_tasks[cid] = task
+        if results and 'tracks' in results and results['tracks']['items']:
+            tracks = []
+            for track in results['tracks']['items']:
+                tracks.append({
+                    'id': track['id'],
+                    'name': track['name'],
+                    'artist': track['artists'][0]['name'],
+                    'artists_full': [a['name'] for a in track['artists']],
+                    'album': track['album']['name'],
+                    'duration': track['duration_ms'] // 1000,
+                    'duration_ms': track['duration_ms'],
+                    'preview_url': track.get('preview_url'),
+                    'spotify_url': track['external_urls'].get('spotify'),
+                    'popularity': track.get('popularity', 0)
+                })
+            return tracks
+        return None
+    except Exception as e:
+        logger.error(f"Spotify top10 search error: {e}")
+        return None
 
-        # Wait for task to complete
-        await task
+async def handle_music_search(m):
+    """Professional music search - Spotify top 10 with inline keyboard"""
+    cid = m.chat.id
+    query = m.text
+    user_state[cid] = None  # Clear state immediately
+
+    try:
+        # Send searching message
+        search_msg = await bot.send_message(cid, "🔍 Spotify'dan qidirilmoqda...")
+
+        # Search Spotify for top 10 results
+        tracks = await search_spotify_top10(query)
+
+        if not tracks:
+            await bot.edit_message_text(
+                "❌ Spotify'da natija topilmadi. Iltimos, boshqa so'rov yuboring.",
+                cid, search_msg.message_id,
+                reply_markup=main_menu()
+            )
+            return
+
+        # Build professional numbered list
+        result_text = f"🎵 *Topilgan natijalar:* `{query}`\n\n"
+        result_text += "*Quyidagi qo'shiqlardan birini tanlang:*\n\n"
+
+        for i, track in enumerate(tracks, 1):
+            artist = track['artist']
+            name = track['name']
+            duration = format_duration(track['duration'])
+            result_text += f"{i}. {artist} - {name} `[{duration}]`\n"
+
+        # Create inline keyboard with numbers 1-10
+        keyboard_rows = []
+
+        # Number buttons (2 rows of 5)
+        row1 = [types.InlineKeyboardButton(str(i), callback_data=f"music:{tracks[i-1]['id']}:{i}") for i in range(1, 6)]
+        row2 = [types.InlineKeyboardButton(str(i), callback_data=f"music:{tracks[i-1]['id']}:{i}") for i in range(6, 11)]
+        keyboard_rows.append(row1)
+        keyboard_rows.append(row2)
+
+        # Navigation buttons
+        keyboard_rows.append([
+            types.InlineKeyboardButton("⬅️ Orqaga", callback_data="music:back"),
+            types.InlineKeyboardButton("❌ Yopish", callback_data="music:close")
+        ])
+
+        markup = types.InlineKeyboardMarkup(keyboard_rows)
+
+        # Store tracks data in user context (temporary)
+        user_state[cid + '_tracks'] = tracks
+        user_state[cid + '_query'] = query
+
+        await bot.edit_message_text(
+            result_text,
+            cid, search_msg.message_id,
+            parse_mode='Markdown',
+            reply_markup=markup
+        )
 
     except Exception as e:
-        logger.error(f"Music search start error: {e}")
+        logger.error(f"Music search error: {e}")
         await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
-    finally:
-        if cid in active_tasks:
-            del active_tasks[cid]
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("music:"))
+async def music_callback_handler(call):
+    """Handle music selection from inline keyboard"""
+    cid = call.message.chat.id
+    data = call.data
+    msg_id = call.message.message_id
+
+    try:
+        await bot.answer_callback_query(call.id)
+
+        # Handle navigation buttons
+        if data == "music:back":
+            await bot.edit_message_text("📋 Asosiy menu", cid, msg_id, reply_markup=main_menu())
+            user_state[cid] = None
+            return
+
+        if data == "music:close":
+            await bot.delete_message(cid, msg_id)
+            user_state[cid] = None
+            return
+
+        # Handle music selection: music:{track_id}:{number}
+        parts = data.split(":")
+        if len(parts) >= 2:
+            track_id = parts[1]
+            track_num = parts[2] if len(parts) > 2 else "?"
+
+            # Get tracks from user context
+            tracks = user_state.get(cid + '_tracks', [])
+            track = None
+            for t in tracks:
+                if t['id'] == track_id:
+                    track = t
+                    break
+
+            if not track:
+                await bot.edit_message_text("❌ Qo'shiq ma'lumotlari topilmadi.", cid, msg_id)
+                return
+
+            # Update message to show loading
+            await bot.edit_message_text(
+                f"🎵 {track['artist']} - {track['name']}\n\n⏳ Yuklanmoqda...",
+                cid, msg_id
+            )
+
+            # Download the track
+            await download_single_track(cid, track, msg_id)
+
+    except Exception as e:
+        logger.error(f"Music callback error: {e}")
+        await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
+
+async def download_single_track(cid, track, msg_id):
+    """Download single track from Spotify metadata"""
+    file_path = None
+    progress_data = {'percent': 0}
+    stop_event = asyncio.Event()
+
+    async with music_semaphore:
+        try:
+            # Create search query from Spotify metadata
+            search_query = f"{track['artist']} - {track['name']} official audio"
+
+            # Progress updater
+            async def update_progress():
+                last_percent = -1
+                while not stop_event.is_set():
+                    try:
+                        percent = progress_data.get('percent', 0)
+                        if percent != last_percent and percent < 100:
+                            last_percent = percent
+                            try:
+                                await bot.edit_message_text(
+                                    f"🎵 {track['artist']} - {track['name']}\n⬇️ {percent}%",
+                                    cid, msg_id
+                                )
+                            except Exception:
+                                pass
+                        await asyncio.sleep(2)
+                    except Exception:
+                        break
+
+            # Progress hook for yt-dlp
+            def progress_hook(d):
+                if d['status'] == 'downloading':
+                    if 'downloaded_bytes' in d and 'total_bytes' in d and d['total_bytes']:
+                        progress_data['percent'] = int(d['downloaded_bytes'] / d['total_bytes'] * 100)
+                    elif 'downloaded_bytes' in d and 'total_bytes_estimate' in d:
+                        progress_data['percent'] = int(d['downloaded_bytes'] / d['total_bytes_estimate'] * 100)
+
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': os.path.join(TEMP_DIR, f'{cid}_%(title)s.%(ext)s'),
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+                'socket_timeout': 15,
+                'retries': 2,
+                'postprocessors': [
+                    {
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '128',
+                    }
+                ],
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                },
+                'progress_hooks': [progress_hook],
+            }
+
+            # Start progress updater
+            progress_task = asyncio.create_task(update_progress())
+
+            # Download
+            loop = asyncio.get_event_loop()
+            info = None
+
+            # Try multiple sources
+            sources = [
+                search_query,
+                f"ytsearch1:{track['artist']} {track['name']}",
+                f"scsearch1:{track['artist']} {track['name']}",
+            ]
+
+            for src in sources:
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = await loop.run_in_executor(None, lambda: ydl.extract_info(src, download=True))
+                    if info:
+                        break
+                except Exception as e:
+                    logger.warning(f"Source failed {src}: {e}")
+                    continue
+
+            # Stop progress updater
+            stop_event.set()
+            try:
+                await progress_task
+            except Exception:
+                pass
+
+            if not info:
+                await bot.edit_message_text(
+                    "❌ Yuklab olishda xatolik. Iltimos, boshqa qo'shiqni tanlang.",
+                    cid, msg_id
+                )
+                return
+
+            # Find downloaded file
+            downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.mp3"))
+            if not downloaded_files:
+                downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.*"))
+
+            if not downloaded_files:
+                await bot.edit_message_text("❌ Fayl topilmadi.", cid, msg_id)
+                return
+
+            file_path = str(downloaded_files[0])
+
+            # Check file size
+            if os.path.getsize(file_path) > 50 * 1024 * 1024:
+                await bot.edit_message_text("❌ Fayl hajmi juda katta (>50MB).", cid, msg_id)
+                return
+
+            # Send audio
+            await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
+
+            with open(file_path, "rb") as f:
+                await bot.send_audio(
+                    cid,
+                    f,
+                    title=track['name'],
+                    performer=track['artist'],
+                    duration=track['duration'],
+                    caption=f"🟢 {track['artist']} - {track['name']}\n✅ @foyda1ii_bot",
+                    reply_markup=main_menu()
+                )
+
+            await bot.delete_message(cid, msg_id)
+
+            # Background cleanup
+            asyncio.create_task(background_cleanup(file_path))
+
+        except Exception as e:
+            logger.error(f"Download single track error: {e}")
+            await bot.edit_message_text(
+                "❌ Xatolik yuz berdi. Iltimos, boshqa qo'shiqni tanlang.",
+                cid, msg_id
+            )
+            safe_remove(file_path)
 
 # ================= VIDEO QUEUE WORKER =================
 async def video_queue_worker():
