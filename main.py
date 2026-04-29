@@ -32,9 +32,10 @@ if not BOT_TOKEN:
 # Async bot instance
 bot = AsyncTeleBot(BOT_TOKEN)
 
-# Semaphore for limiting concurrent heavy tasks (5 max concurrent video processing)
-video_semaphore = asyncio.Semaphore(5)
+# Semaphore for limiting concurrent heavy tasks
+video_semaphore = asyncio.Semaphore(3)  # Reduced for queue-based processing
 music_semaphore = asyncio.Semaphore(10)
+circle_semaphore = asyncio.Semaphore(2)  # Separate for circle videos
 
 TEMP_DIR = tempfile.gettempdir()
 
@@ -47,6 +48,15 @@ user_voice = {}
 
 # Track active user tasks for cleanup
 active_tasks = {}
+
+# Video processing queue for sequential but fast processing
+video_queue = asyncio.Queue()
+
+# Background cleanup task
+async def background_cleanup(file_path, delay=5):
+    """Cleanup files in background after delay seconds"""
+    await asyncio.sleep(delay)
+    safe_remove(file_path)
 
 # ================= TEMP FILE CLEANUP =================
 def cleanup_temp_files(cid):
@@ -465,19 +475,35 @@ async def handle_autopost(m):
     user_state[cid] = None
 
 async def download_music_async(cid, query, search_msg):
-    """Async music download with semaphore and status updates"""
+    """Async music download with multiple source fallback and improved error handling"""
     file_path = None
 
     # Acquire semaphore to limit concurrent downloads
     async with music_semaphore:
         try:
             # Update status
-            await bot.edit_message_text("🔍 YouTube'dan qidirilmoqda...", cid, search_msg.message_id)
+            await bot.edit_message_text("🔍 Musiqa qidirilmoqda...", cid, search_msg.message_id)
 
             # Clean up old files
             cleanup_temp_files(cid)
 
-            # yt-dlp options optimized for SPEED (bestaudio only, no post-processing)
+            # Real browser headers to avoid bot detection
+            http_headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
+            }
+
+            # yt-dlp options optimized for SPEED with auto search
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'outtmpl': os.path.join(TEMP_DIR, f'{cid}_%(title)s.%(ext)s'),
@@ -489,7 +515,7 @@ async def download_music_async(cid, query, search_msg):
                 'fragment_retries': 2,
                 'retry_sleep': 2,
                 'extract_flat': False,
-                'default_search': 'ytsearch1',
+                'default_search': 'auto',  # Search all available extractors
                 'playlist_items': '1',
                 # Speed optimizations
                 'buffersize': 4096,
@@ -499,84 +525,141 @@ async def download_music_async(cid, query, search_msg):
                     {
                         'key': 'FFmpegExtractAudio',
                         'preferredcodec': 'mp3',
-                        'preferredquality': '128',  # Lower quality = faster
+                        'preferredquality': '128',
                     }
                 ],
-                # User agent
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                }
+                # Real browser headers
+                'http_headers': http_headers,
+                # Cookie handling to appear more like a real user
+                'cookiesfrombrowser': None,  # Don't use browser cookies
             }
-
-            search_query = f"ytsearch1:{query} audio"
 
             # Run yt-dlp in executor to not block event loop
             loop = asyncio.get_event_loop()
+            info = None
+            last_error = None
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Try multiple search strategies - SoundCloud FIRST to avoid YouTube blocking
+            search_strategies = [
+                f"scsearch1:{query}",  # SoundCloud FIRST (less bot detection)
+                f"scsearch1:{query} official",  # SoundCloud official
+                f"{query} audio",  # Auto search all sources
+                f"ytsearch1:{query} audio",  # YouTube (last resort - may block)
+            ]
+
+            for attempt, search_query in enumerate(search_strategies):
                 try:
-                    info = await loop.run_in_executor(None, lambda: ydl.extract_info(search_query, download=True))
+                    if attempt > 0:
+                        await bot.edit_message_text(f"🔍 Boshqa manbalardan qidirilmoqda... ({attempt}/3)", cid, search_msg.message_id)
+
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = await loop.run_in_executor(None, lambda: ydl.extract_info(search_query, download=True))
+
+                    # Check if we got valid results
+                    if info:
+                        if 'entries' in info and info['entries']:
+                            break
+                        elif 'url' in info or 'formats' in info:
+                            # Single direct result
+                            break
+
                 except Exception as e:
-                    logger.error(f"Download error: {e}")
-                    await bot.edit_message_text("⏳ Qayta urinilmoqda...", cid, search_msg.message_id)
-                    # Retry with simpler query
-                    search_query = f"ytsearch1:{query}"
-                    info = await loop.run_in_executor(None, lambda: ydl.extract_info(search_query, download=True))
+                    error_str = str(e).lower()
+                    last_error = e
+                    logger.warning(f"Search attempt {attempt + 1} failed for query '{search_query}': {e}")
 
-                if not info or 'entries' not in info or not info['entries']:
-                    await bot.edit_message_text("❌ Hech narsa topilmadi. Boshqa so'rov yuboring.", cid, search_msg.message_id)
-                    return
+                    # Check for specific bot detection errors
+                    if any(x in error_str for x in ['sign in', 'confirm you', 'robot', 'bot', 'verify']):
+                        logger.warning(f"Bot detection triggered on source {search_query}, trying next source...")
+                        continue
 
+                    # If not a bot detection error, might be worth retrying
+                    if attempt < len(search_strategies) - 1:
+                        await asyncio.sleep(1)
+                        continue
+
+            # Check if we got any valid results
+            if not info:
+                await bot.edit_message_text(
+                    "❌ Musiqa topilmadi. Iltimos, boshqa qo'shiq nomi yoki ijrochi yozib ko'ring.",
+                    cid, search_msg.message_id
+                )
+                return
+
+            # Extract entry data
+            entry = None
+            if 'entries' in info and info['entries']:
                 entry = info['entries'][0]
-                title = entry.get('title', 'Unknown')
-                artist = entry.get('uploader', entry.get('channel', 'Unknown'))
-                duration = entry.get('duration', 0)
+            elif 'url' in info:
+                # Direct result
+                entry = info
+            else:
+                await bot.edit_message_text("❌ Musiqa ma'lumotlari olinmadi.", cid, search_msg.message_id)
+                return
 
-                # Update status
-                await bot.edit_message_text("📤 Yuborilmoqda...", cid, search_msg.message_id)
+            title = entry.get('title', 'Unknown')
+            artist = entry.get('uploader', entry.get('channel', entry.get('artist', 'Unknown')))
+            duration = entry.get('duration', 0)
+            extractor = entry.get('extractor', 'unknown')
 
-                # Find the downloaded file
-                downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.mp3"))
+            logger.info(f"Found music: {title} by {artist} from {extractor}")
+
+            # Update status
+            await bot.edit_message_text("📤 Yuborilmoqda...", cid, search_msg.message_id)
+
+            # Find the downloaded file
+            downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.mp3"))
+            if not downloaded_files:
+                # Try other audio formats
+                downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.*"))
                 if not downloaded_files:
-                    # Try other audio formats
-                    downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.*"))
-                    if not downloaded_files:
-                        await bot.edit_message_text("❌ Fayl topilmadi.", cid, search_msg.message_id)
-                        return
-
-                file_path = str(downloaded_files[0])
-
-                # Check file size (Telegram limit ~50MB for bots)
-                file_size = os.path.getsize(file_path)
-                if file_size > 50 * 1024 * 1024:
-                    await bot.edit_message_text("❌ Fayl hajmi juda katta (>50MB).", cid, search_msg.message_id)
+                    await bot.edit_message_text("❌ Fayl topilmadi.", cid, search_msg.message_id)
                     return
 
-                # Send the audio
-                with open(file_path, "rb") as f:
-                    await bot.send_audio(
-                        cid,
-                        f,
-                        title=title,
-                        performer=artist,
-                        duration=duration,
-                        caption=f"🎵 {artist} - {title}\n✅ @foyda1ii_bot",
-                        reply_markup=main_menu()
-                    )
+            file_path = str(downloaded_files[0])
 
-                await bot.delete_message(cid, search_msg.message_id)
-                user_state[cid] = None
+            # Check file size (Telegram limit ~50MB for bots)
+            file_size = os.path.getsize(file_path)
+            if file_size > 50 * 1024 * 1024:
+                await bot.edit_message_text("❌ Fayl hajmi juda katta (>50MB).", cid, search_msg.message_id)
+                return
+
+            # Determine source emoji
+            source_emoji = "🎵"
+            if 'soundcloud' in extractor.lower():
+                source_emoji = "☁️"
+            elif 'youtube' in extractor.lower():
+                source_emoji = "▶️"
+            elif 'bandcamp' in extractor.lower():
+                source_emoji = "🎸"
+
+            # Send the audio
+            with open(file_path, "rb") as f:
+                await bot.send_audio(
+                    cid,
+                    f,
+                    title=title,
+                    performer=artist,
+                    duration=duration,
+                    caption=f"{source_emoji} {artist} - {title}\n✅ @foyda1ii_bot",
+                    reply_markup=main_menu()
+                )
+
+            await bot.delete_message(cid, search_msg.message_id)
+            user_state[cid] = None
 
         except Exception as e:
             logger.error(f"Music search error: {e}")
-            error_msg = str(e)
+            error_msg = str(e).lower()
             try:
-                if "Timeout" in error_msg:
+                if "timeout" in error_msg:
                     await bot.edit_message_text("❌ Server javob bermadi. Iltimos, keyinroq urinib ko'ring.", cid, search_msg.message_id)
-                elif "Connection" in error_msg:
+                elif "connection" in error_msg:
                     await bot.edit_message_text("❌ Internet bog'lanishida muammo. Qayta urinib ko'ring.", cid, search_msg.message_id)
+                elif any(x in error_msg for x in ['sign in', 'confirm you', 'robot', 'bot', 'verify']):
+                    await bot.edit_message_text("❌ Bu musiqa manbasi vaqtincha bloklangan. Iltimos, boshqa qo'shiq qidiring.", cid, search_msg.message_id)
                 else:
-                    await bot.edit_message_text(f"❌ Xatolik: {error_msg[:100]}", cid, search_msg.message_id)
+                    await bot.edit_message_text(f"❌ Xatolik yuz berdi. Iltimos, boshqa musiqa qidirib ko'ring.", cid, search_msg.message_id)
             except Exception:
                 pass
         finally:
@@ -606,10 +689,32 @@ async def handle_music_search(m):
         if cid in active_tasks:
             del active_tasks[cid]
 
+# ================= VIDEO QUEUE WORKER =================
+async def video_queue_worker():
+    """Process circle videos from queue sequentially but fast"""
+    while True:
+        try:
+            # Get task from queue
+            task = await video_queue.get()
+            cid, input_path, output_path, msg_id = task
+
+            async with circle_semaphore:
+                try:
+                    await handle_circle_video(cid, input_path, output_path, msg_id)
+                except Exception as e:
+                    logger.error(f"Queue processing error for {cid}: {e}")
+                finally:
+                    # Mark task as done
+                    video_queue.task_done()
+
+        except Exception as e:
+            logger.error(f"Queue worker error: {e}")
+            await asyncio.sleep(1)
+
 # ================= VIDEO HANDLER =================
 @bot.message_handler(content_types=['video'])
 async def video_handler(m):
-    """Handle video uploads with semaphore for limiting concurrent processing"""
+    """Handle video uploads with queue-based processing for circle videos"""
     cid = m.chat.id
     state = user_state.get(cid)
 
@@ -637,19 +742,25 @@ async def video_handler(m):
         # Check size limit (100MB for processing)
         if file_size > 100 * 1024 * 1024:
             await bot.edit_message_text("❌ Video hajmi juda katta (>100MB). Kichikroq video yuboring.", cid, msg.message_id)
-            safe_remove(input_path)
+            asyncio.create_task(background_cleanup(input_path))
             return
 
-        # Process with semaphore to limit concurrent heavy tasks
+        # Process based on state
         if state == "mp3":
             output_path = os.path.join(TEMP_DIR, f"{cid}_output.mp3")
             async with video_semaphore:
-                await handle_video_to_mp3(cid, input_path, output_path, msg.message_id)
+                try:
+                    await handle_video_to_mp3(cid, input_path, output_path, msg.message_id)
+                finally:
+                    # Background cleanup for MP3
+                    asyncio.create_task(background_cleanup(input_path))
+                    asyncio.create_task(background_cleanup(output_path))
 
         elif state == "circle":
             output_path = os.path.join(TEMP_DIR, f"{cid}_circle.mp4")
-            async with video_semaphore:
-                await handle_circle_video(cid, input_path, output_path, msg.message_id)
+            # Add to queue for sequential processing
+            await video_queue.put((cid, input_path, output_path, msg.message_id))
+            await bot.edit_message_text(f"🔵 Navbatga qo'shildi. {video_queue.qsize()} ta video kutmoqda...", cid, msg.message_id)
 
         user_state[cid] = None
 
@@ -659,9 +770,11 @@ async def video_handler(m):
             await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
         except Exception:
             pass
-    finally:
-        safe_remove(input_path)
-        safe_remove(output_path)
+        # Background cleanup on error
+        if input_path:
+            asyncio.create_task(background_cleanup(input_path))
+        if output_path:
+            asyncio.create_task(background_cleanup(output_path))
 
 async def run_ffmpeg_async(cmd):
     """Run ffmpeg command asynchronously"""
@@ -731,7 +844,7 @@ async def check_ffmpeg_installed():
         return False
 
 async def handle_circle_video(cid, input_path, output_path, msg_id):
-    """Convert video to circle video note format - async version"""
+    """Convert video to circle video note format - optimized for SPEED"""
     try:
         # Check ffmpeg is installed
         ffmpeg_installed = await check_ffmpeg_installed()
@@ -740,7 +853,9 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             logger.error("FFmpeg is not installed on the server")
             return
 
-        await bot.edit_message_text("🔵 Yumaloq video yaratilmoqda (400x400)...", cid, msg_id)
+        # 320x320 for 2x faster processing with minimal quality loss
+        CIRCLE_SIZE = 320
+        await bot.edit_message_text(f"🔵 Yumaloq video yaratilmoqda ({CIRCLE_SIZE}x{CIRCLE_SIZE})...", cid, msg_id)
 
         # Get video dimensions
         probe_cmd = [
@@ -767,21 +882,23 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             crop_x = "(iw-min(iw,ih))/2"
             crop_y = "(ih-min(iw,ih))/2"
 
-        # FFmpeg command for circle video - 400x400, square format
+        # FFmpeg command for FAST circle video - 320x320, all cores, optimized
         cmd = [
             "ffmpeg", "-y",
             "-i", input_path,
-            "-vf", f"crop={min_dim}:{min_dim}:{crop_x}:{crop_y},scale=400:400:force_original_aspect_ratio=increase,crop=400:400,setsar=1:1",
+            "-vf", f"crop={min_dim}:{min_dim}:{crop_x}:{crop_y},scale={CIRCLE_SIZE}:{CIRCLE_SIZE}:force_original_aspect_ratio=increase,crop={CIRCLE_SIZE}:{CIRCLE_SIZE},setsar=1:1",
             "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "28",
+            "-preset", "ultrafast",  # Fastest preset
+            "-crf", "30",  # Slightly higher for speed (was 28)
+            "-threads", "0",  # Use ALL CPU cores
             "-c:a", "aac",
-            "-b:a", "128k",
+            "-b:a", "96k",  # Reduced from 128k for speed
             "-ar", "44100",
-            "-ac", "2",
+            "-ac", "1",  # Mono for speed (was 2)
             "-movflags", "+faststart",
             "-t", "60",
             "-pix_fmt", "yuv420p",
+            "-fflags", "+fastseek",  # Fast seeking
             output_path
         ]
 
@@ -801,9 +918,13 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
         await bot.edit_message_text("📤 Yumaloq video yuborilmoqda...", cid, msg_id)
 
         with open(output_path, "rb") as f:
-            await bot.send_video_note(cid, f, length=400, reply_markup=main_menu())
+            await bot.send_video_note(cid, f, length=CIRCLE_SIZE, reply_markup=main_menu())
 
         await bot.delete_message(cid, msg_id)
+
+        # Background cleanup - don't wait
+        asyncio.create_task(background_cleanup(input_path))
+        asyncio.create_task(background_cleanup(output_path))
 
     except subprocess.TimeoutExpired:
         await bot.edit_message_text("❌ Vaqt tugadi. Video juda katta.", cid, msg_id)
@@ -835,6 +956,10 @@ async def main():
 
     # Start auto post loop in background
     asyncio.create_task(auto_post_loop())
+
+    # Start video queue worker for sequential but fast circle video processing
+    asyncio.create_task(video_queue_worker())
+    logger.info("Video queue worker started")
 
     # Start bot polling
     while True:
