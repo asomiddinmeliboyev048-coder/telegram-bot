@@ -803,18 +803,21 @@ async def handle_music_search(m):
     """Professional music search - Spotify top 10 with inline keyboard"""
     cid = m.chat.id
     query = m.text
-    user_state[cid] = None  # Clear state immediately
+    search_msg = None
 
     try:
+        user_state[cid] = None  # Clear state immediately
+
         # Send searching message
         search_msg = await bot.send_message(cid, "🔍 Spotify'dan qidirilmoqda...")
 
         # Search Spotify for top 10 results
         tracks = await search_spotify_top10(query)
 
-        if not tracks:
+        # CRITICAL: Check if tracks is empty or None before creating keyboard
+        if not tracks or len(tracks) == 0:
             await bot.edit_message_text(
-                "❌ Spotify'da natija topilmadi. Iltimos, boshqa so'rov yuboring.",
+                "❌ Topilmadi",
                 cid, search_msg.message_id,
                 reply_markup=main_menu()
             )
@@ -875,7 +878,17 @@ async def handle_music_search(m):
 
     except Exception as e:
         logger.error(f"Music search error: {e}")
-        await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
+        try:
+            if search_msg:
+                await bot.edit_message_text(
+                    f"❌ Xatolik: {str(e)[:100]}",
+                    cid, search_msg.message_id,
+                    reply_markup=main_menu()
+                )
+            else:
+                await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
+        except Exception:
+            pass
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sp_dl:"))
 async def download_spotify_url_handler(call):
@@ -1273,7 +1286,7 @@ async def video_handler(m):
         # Check size limit (100MB for processing)
         if file_size > 100 * 1024 * 1024:
             await bot.edit_message_text("❌ Video hajmi juda katta (>100MB). Kichikroq video yuboring.", cid, msg.message_id)
-            asyncio.create_task(background_cleanup(input_path))
+            safe_remove(input_path)
             return
 
         # Process based on state - IMMEDIATE RESPONSE
@@ -1303,11 +1316,11 @@ async def video_handler(m):
             await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
         except Exception:
             pass
-        # Background cleanup on error
+        # Immediate cleanup on error
         if input_path:
-            asyncio.create_task(background_cleanup(input_path))
+            safe_remove(input_path)
         if output_path:
-            asyncio.create_task(background_cleanup(output_path))
+            safe_remove(output_path)
 
 async def run_ffmpeg_async(cmd):
     """Run ffmpeg command asynchronously using thread pool"""
@@ -1503,10 +1516,7 @@ async def main():
         try:
             logger.info("🔥 ASYNC BOT ISHLAYAPTI...")
             await bot.infinity_polling(
-                skip_pending=True,
-                timeout=60,
-                interval=3,
-                none_stop=True
+                skip_pending=True
             )
         except Exception as e:
             logger.error(f"Polling error: {e}")
