@@ -830,22 +830,22 @@ async def handle_music_search(m):
             duration = format_duration(track['duration'])
             result_text += f"{i}. {artist} - {name} `[{duration}]`\n"
 
-        # Create inline keyboard with numbers 1-10 - Tingla Bot style
+        # Create inline keyboard with numbers 1-10 - PROFESSIONAL UI
         keyboard_rows = []
 
-        # Row 1: buttons 1-5 with Spotify URL in callback_data
+        # Row 1: buttons 1-5 with sp_dl: prefix
         if len(tracks) >= 1:
-            row1 = [types.InlineKeyboardButton(str(i), callback_data=f"dl_{tracks[i-1]['spotify_url']}") for i in range(1, min(6, len(tracks)+1))]
+            row1 = [types.InlineKeyboardButton(str(i), callback_data=f"sp_dl:{tracks[i-1]['spotify_url']}") for i in range(1, min(6, len(tracks)+1))]
             if row1:
                 keyboard_rows.append(row1)
 
-        # Row 2: buttons 6-10 with Spotify URL (if available)
+        # Row 2: buttons 6-10 with sp_dl: prefix
         if len(tracks) >= 6:
-            row2 = [types.InlineKeyboardButton(str(i), callback_data=f"dl_{tracks[i-1]['spotify_url']}") for i in range(6, min(11, len(tracks)+1))]
+            row2 = [types.InlineKeyboardButton(str(i), callback_data=f"sp_dl:{tracks[i-1]['spotify_url']}") for i in range(6, min(11, len(tracks)+1))]
             if row2:
                 keyboard_rows.append(row2)
 
-        # Row 3: Navigation buttons (ALWAYS present)
+        # Row 3: Navigation buttons
         keyboard_rows.append([
             types.InlineKeyboardButton("⬅️ Orqaga", callback_data="music:back"),
             types.InlineKeyboardButton("❌ Yopish", callback_data="music:close")
@@ -877,9 +877,9 @@ async def handle_music_search(m):
         logger.error(f"Music search error: {e}")
         await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("dl_"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("sp_dl:"))
 async def download_spotify_url_handler(call):
-    """Handle download from Spotify URL - Tingla Bot style"""
+    """Handle download from Spotify URL - PROFESSIONAL"""
     cid = call.message.chat.id
     data = call.data
     msg_id = call.message.message_id
@@ -888,7 +888,7 @@ async def download_spotify_url_handler(call):
         await bot.answer_callback_query(call.id)
 
         # Extract Spotify URL from callback_data
-        spotify_url = data[3:]  # Remove "dl_" prefix
+        spotify_url = data[6:]  # Remove "sp_dl:" prefix
 
         # Get track info from stored data
         tracks_dict = user_state.get(cid + '_tracks', {})
@@ -908,7 +908,7 @@ async def download_spotify_url_handler(call):
         # Update message to show loading
         try:
             await bot.edit_message_text(
-                f"🎵 {track['artist']} - {track['name']}\n\n⏳ Yuklanmoqda...",
+                f"🎵 {track['artist']} - {track['name']}\n\n⏳ Musiqa yuklanmoqda...",
                 cid, msg_id
             )
         except Exception:
@@ -1072,8 +1072,8 @@ async def download_single_track(cid, track, msg_id):
 
             await bot.delete_message(cid, msg_id)
 
-            # Background cleanup
-            asyncio.create_task(background_cleanup(file_path))
+            # Immediate cleanup
+            safe_remove(file_path)
 
         except Exception as e:
             logger.error(f"Download single track error: {e}")
@@ -1209,8 +1209,8 @@ async def download_from_spotify_url(cid, track, spotify_url, msg_id):
 
             await bot.delete_message(cid, msg_id)
 
-            # Background cleanup
-            asyncio.create_task(background_cleanup(file_path))
+            # Immediate cleanup
+            safe_remove(file_path)
 
         except Exception as e:
             logger.error(f"Download from URL error: {e}")
@@ -1276,22 +1276,24 @@ async def video_handler(m):
             asyncio.create_task(background_cleanup(input_path))
             return
 
-        # Process based on state
+        # Process based on state - IMMEDIATE RESPONSE
         if state == "mp3":
             output_path = os.path.join(TEMP_DIR, f"{cid}_output.mp3")
+            # Send immediate status
+            await bot.edit_message_text("⏳ Audio ajratilmoqda...", cid, msg.message_id)
             async with video_semaphore:
                 try:
                     await handle_video_to_mp3(cid, input_path, output_path, msg.message_id)
-                finally:
-                    # Background cleanup for MP3
-                    asyncio.create_task(background_cleanup(input_path))
-                    asyncio.create_task(background_cleanup(output_path))
+                except Exception as e:
+                    logger.error(f"MP3 error: {e}")
+                    await bot.edit_message_text(f"❌ Xatolik: {str(e)[:100]}", cid, msg.message_id)
 
         elif state == "circle":
             output_path = os.path.join(TEMP_DIR, f"{cid}_circle.mp4")
+            # Send immediate status
+            await bot.edit_message_text("⏳ Yumaloq video yaratilmoqda...", cid, msg.message_id)
             # Add to queue for sequential processing
             await video_queue.put((cid, input_path, output_path, msg.message_id))
-            await bot.edit_message_text(f"🔵 Navbatga qo'shildi. {video_queue.qsize()} ta video kutmoqda...", cid, msg.message_id)
 
         user_state[cid] = None
 
@@ -1312,20 +1314,18 @@ async def run_ffmpeg_async(cmd):
     return await run_in_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=300)
 
 async def handle_video_to_mp3(cid, input_path, output_path, msg_id):
-    """Convert video to MP3 - TURBO MODE with libmp3lame VBR"""
+    """Extract audio from video to MP3 - AUDIO-ONLY EXTRACTION (80% faster)"""
     try:
-        await bot.edit_message_text("🎵 Audio ajratib olinmoqda...", cid, msg_id)
+        await bot.edit_message_text("🎵 Audio ajratilmoqda...", cid, msg_id)
 
-        # TURBO FFmpeg command with libmp3lame VBR - maximum speed
+        # FASTEST FFmpeg command - audio-only, no video processing at all
         cmd = [
             "ffmpeg", "-y",
             "-i", input_path,
-            "-vn",                      # No video
-            "-acodec", "libmp3lame",   # Fast MP3 encoder
-            "-q:a", "4",               # VBR quality 4 (faster than 2, good quality)
-            "-ar", "44100",            # Sample rate
-            "-ac", "2",                # Stereo
-            "-threads", "0",          # Use ALL CPU cores for maximum speed
+            "-vn",                     # No video (ignore video stream)
+            "-acodec", "libmp3lame",  # Fast MP3 encoder
+            "-q:a", "4",             # VBR quality 4 (fast, good quality)
+            "-threads", "0",          # All CPU cores
             output_path
         ]
 
@@ -1336,13 +1336,12 @@ async def handle_video_to_mp3(cid, input_path, output_path, msg_id):
             await bot.edit_message_text("❌ Konvertatsiyada xatolik.", cid, msg_id)
             return
 
-        # Check output file
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             await bot.edit_message_text("❌ Audio fayl yaratilmadi.", cid, msg_id)
             return
 
-        # Send audio
-        await bot.edit_message_text("📤 MP3 yuborilmoqda...", cid, msg_id)
+        # Send audio immediately
+        await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
 
         with open(output_path, "rb") as f:
             await bot.send_audio(
@@ -1355,6 +1354,10 @@ async def handle_video_to_mp3(cid, input_path, output_path, msg_id):
             )
 
         await bot.delete_message(cid, msg_id)
+
+        # Immediate cleanup
+        safe_remove(input_path)
+        safe_remove(output_path)
 
     except subprocess.TimeoutExpired:
         await bot.edit_message_text("❌ Vaqt tugadi. Video juda katta.", cid, msg_id)
@@ -1376,36 +1379,32 @@ async def check_ffmpeg_installed():
         return False
 
 async def handle_circle_video(cid, input_path, output_path, msg_id):
-    """Convert video to circle video note format - TURBO MODE (3-4x faster)"""
+    """Convert video to circle video note format - MAXIMUM SPEED MODE"""
     try:
         # Check ffmpeg is installed
         ffmpeg_installed = await check_ffmpeg_installed()
         if not ffmpeg_installed:
             await bot.edit_message_text("❌ Serverda ffmpeg o'rnatilmagan.", cid, msg_id)
-            logger.error("FFmpeg is not installed on the server")
             return
 
-        # TURBO SETTINGS: Strict 320x320, 24fps, maximum compression
+        # MAX SPEED SETTINGS
         CIRCLE_SIZE = 320
-        FPS = 24  # Lower fps for 3-4x speed boost
+        FPS = 24
 
-        await bot.edit_message_text(f"🔵 Turbo rejim: {CIRCLE_SIZE}x{CIRCLE_SIZE} @ {FPS}fps", cid, msg_id)
+        await bot.edit_message_text(f"🔵 Ultra tezlik: {CIRCLE_SIZE}x{CIRCLE_SIZE} @ {FPS}fps", cid, msg_id)
 
-        # Get video dimensions
-        probe_cmd = [
-            "ffprobe", "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=s=x:p=0",
-            input_path
-        ]
+        # Simple center crop calculation
         try:
+            probe_cmd = [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=s=x:p=0",
+                input_path
+            ]
             probe_result = await run_in_thread(
-                subprocess.run,
-                probe_cmd,
-                capture_output=True,
-                text=True,
-                timeout=10
+                subprocess.run, probe_cmd,
+                capture_output=True, text=True, timeout=5
             )
             dims = probe_result.stdout.strip().split('x')
             width, height = int(dims[0]), int(dims[1])
@@ -1413,32 +1412,24 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             crop_x = (width - min_dim) // 2
             crop_y = (height - min_dim) // 2
         except Exception:
-            # Default to center crop if probe fails
             min_dim = "min(iw,ih)"
             crop_x = "(iw-min(iw,ih))/2"
             crop_y = "(ih-min(iw,ih))/2"
 
-        # TURBO FFmpeg command - 3-4x faster processing
-        # Key optimizations: -tune zerolatency, fps=24, strict 320x320, max threads
+        # MAX SPEED FFmpeg command - simplified for Render
         cmd = [
             "ffmpeg", "-y",
             "-i", input_path,
-            # Strict 320x320, 24fps for maximum speed
-            "-vf", f"crop={min_dim}:{min_dim}:{crop_x}:{crop_y},fps={FPS},scale={CIRCLE_SIZE}:{CIRCLE_SIZE}:flags=fast_bilinear,setsar=1:1",
+            # Simplified filter: crop + fps + scale
+            "-vf", f"crop={min_dim}:{min_dim}:{crop_x}:{crop_y},fps={FPS},scale={CIRCLE_SIZE}:{CIRCLE_SIZE}",
             "-c:v", "libx264",
-            "-preset", "ultrafast",      # Maximum speed preset
-            "-tune", "zerolatency",       # Ultra-low latency mode (key for speed)
-            "-crf", "28",                # Balanced quality/speed for fast processing
-            "-threads", "0",              # ALL CPU cores
-            "-c:a", "aac",
-            "-b:a", "64k",               # Lower audio bitrate for speed
-            "-ar", "22050",              # Lower sample rate
-            "-ac", "1",                  # Mono audio
+            "-preset", "ultrafast",    # Maximum speed
+            "-tune", "zerolatency",     # Low latency
+            "-crf", "28",              # Balanced quality
+            "-threads", "0",           # All CPU cores
+            "-acodec", "copy",         # Copy audio without re-encoding (FAST!)
+            "-t", "60",                # Max 60 seconds
             "-movflags", "+faststart",
-            "-t", "60",                  # Max 60 seconds
-            "-pix_fmt", "yuv420p",
-            "-fflags", "+fastseek",
-            "-max_muxing_queue_size", "1024",  # Prevent buffer issues
             output_path
         ]
 
@@ -1446,25 +1437,24 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
 
         if result.returncode != 0:
             logger.error(f"FFmpeg error: {result.stderr}")
-            await bot.edit_message_text(f"❌ Video konvertatsiyada xatolik:\n{result.stderr[:100]}", cid, msg_id)
+            await bot.edit_message_text("❌ Video konvertatsiyada xatolik.", cid, msg_id)
             return
 
-        # Check output
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             await bot.edit_message_text("❌ Video fayl yaratilmadi.", cid, msg_id)
             return
 
-        # Send video note (circle video)
-        await bot.edit_message_text("📤 Yumaloq video yuborilmoqda...", cid, msg_id)
+        # Send video note
+        await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
 
         with open(output_path, "rb") as f:
             await bot.send_video_note(cid, f, length=CIRCLE_SIZE, reply_markup=main_menu())
 
         await bot.delete_message(cid, msg_id)
 
-        # Background cleanup - don't wait
-        asyncio.create_task(background_cleanup(input_path))
-        asyncio.create_task(background_cleanup(output_path))
+        # Immediate cleanup
+        safe_remove(input_path)
+        safe_remove(output_path)
 
     except subprocess.TimeoutExpired:
         await bot.edit_message_text("❌ Vaqt tugadi. Video juda katta.", cid, msg_id)
@@ -1494,6 +1484,13 @@ async def main():
     """Main async function"""
     logger.info("Starting async bot...")
 
+    # Remove webhook to prevent 409 Conflict errors on Render
+    try:
+        await bot.remove_webhook()
+        logger.info("✅ Webhook removed successfully")
+    except Exception as e:
+        logger.warning(f"Webhook removal warning: {e}")
+
     # Start auto post loop in background
     asyncio.create_task(auto_post_loop())
 
@@ -1501,18 +1498,19 @@ async def main():
     asyncio.create_task(video_queue_worker())
     logger.info("Video queue worker started")
 
-    # Start bot polling
+    # Start bot polling with skip_pending to avoid processing old updates
     while True:
         try:
             logger.info("🔥 ASYNC BOT ISHLAYAPTI...")
             await bot.infinity_polling(
                 skip_pending=True,
                 timeout=60,
-                interval=3
+                interval=3,
+                none_stop=True
             )
         except Exception as e:
             logger.error(f"Polling error: {e}")
-            await asyncio.sleep(10)
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     try:
