@@ -31,9 +31,18 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is required!")
 
-# Spotify API credentials
+# Spotify API credentials - Check environment variables
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+
+# Detailed logging for Render environment
+logger.info(f"ENV CHECK: SPOTIFY_CLIENT_ID set: {bool(SPOTIFY_CLIENT_ID)}")
+logger.info(f"ENV CHECK: SPOTIFY_CLIENT_SECRET set: {bool(SPOTIFY_CLIENT_SECRET)}")
+
+if not SPOTIFY_CLIENT_ID:
+    logger.error("❌ SPOTIFY_CLIENT_ID is MISSING in environment variables!")
+if not SPOTIFY_CLIENT_SECRET:
+    logger.error("❌ SPOTIFY_CLIENT_SECRET is MISSING in environment variables!")
 
 # Initialize Spotify client if credentials available
 spotify_client = None
@@ -43,12 +52,12 @@ if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
             client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET
         )
         spotify_client = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
-        logger.info("Spotify client initialized successfully")
+        logger.info("✅ Spotify client initialized successfully")
     except Exception as e:
-        logger.error(f"SPOTIFY INIT ERROR: {e}")
-        logger.error(f"SPOTIFY_CLIENT_ID exists: {bool(SPOTIFY_CLIENT_ID)}")
-        logger.error(f"SPOTIFY_CLIENT_SECRET exists: {bool(SPOTIFY_CLIENT_SECRET)}")
+        logger.error(f"❌ SPOTIFY INIT ERROR: {e}")
         spotify_client = None
+else:
+    logger.warning("⚠️ Spotify client NOT initialized - credentials missing!")
 
 # Async helper for CPU-bound tasks
 async def run_in_thread(func, *args, **kwargs):
@@ -647,8 +656,7 @@ async def download_music_async(cid, query, search_msg):
                 'progress_hooks': [progress_hook],
             }
 
-            # Run yt-dlp in executor
-            loop = asyncio.get_event_loop()
+            # Run yt-dlp in thread pool for async operation
             info = None
             download_sources = [
                 search_query,  # Primary source (Spotify query or SoundCloud)
@@ -662,7 +670,7 @@ async def download_music_async(cid, query, search_msg):
                         await bot.edit_message_text(f"🔍 Boshqa manbadan qidirilmoqda... ({attempt}/2)", cid, search_msg.message_id)
 
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = await loop.run_in_executor(None, lambda: ydl.extract_info(dl_query, download=True))
+                        info = await run_in_thread(ydl.extract_info, dl_query, download=True)
 
                     if info:
                         if 'entries' in info and info['entries']:
@@ -719,7 +727,7 @@ async def download_music_async(cid, query, search_msg):
                 return
 
             # Source emoji
-            source_emoji = {"spotify": "🟢", "soundcloud": "☁️", "youtube": "▶️"}.get(source.lower(), "�")
+            source_emoji = {"spotify": "🟢", "soundcloud": "☁️", "youtube": "▶️"}.get(source.lower(), "🎵")
 
             # Send audio with Spotify-accurate metadata
             with open(file_path, "rb") as f:
@@ -825,27 +833,27 @@ async def handle_music_search(m):
         # Create inline keyboard with numbers 1-10 - VALIDATED (no empty rows)
         keyboard_rows = []
 
-        # Number buttons (2 rows of 5) - validated
-        row1 = [types.InlineKeyboardButton(str(i), callback_data=f"music:{tracks[i-1]['id']}:{i}") for i in range(1, 6)]
-        row2 = [types.InlineKeyboardButton(str(i), callback_data=f"music:{tracks[i-1]['id']}:{i}") for i in range(6, 11)]
+        # Row 1: buttons 1-5
+        if len(tracks) >= 1:
+            row1 = [types.InlineKeyboardButton(str(i), callback_data=f"music:{tracks[i-1]['id']}:{i}") for i in range(1, min(6, len(tracks)+1))]
+            if row1:  # Extra check to ensure no empty row
+                keyboard_rows.append(row1)
 
-        # Only add non-empty rows
-        if row1:
-            keyboard_rows.append(row1)
-        if row2:
-            keyboard_rows.append(row2)
+        # Row 2: buttons 6-10 (if available)
+        if len(tracks) >= 6:
+            row2 = [types.InlineKeyboardButton(str(i), callback_data=f"music:{tracks[i-1]['id']}:{i}") for i in range(6, min(11, len(tracks)+1))]
+            if row2:  # Extra check to ensure no empty row
+                keyboard_rows.append(row2)
 
-        # Navigation buttons - always ensure at least one button
-        nav_buttons = []
-        nav_buttons.append(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="music:back"))
-        nav_buttons.append(types.InlineKeyboardButton("❌ Yopish", callback_data="music:close"))
+        # Row 3: Navigation buttons (ALWAYS present, never empty)
+        keyboard_rows.append([
+            types.InlineKeyboardButton("⬅️ Orqaga", callback_data="music:back"),
+            types.InlineKeyboardButton("❌ Yopish", callback_data="music:close")
+        ])
 
-        if nav_buttons:
-            keyboard_rows.append(nav_buttons)
-
-        # Final validation - ensure markup is not empty
-        if not keyboard_rows:
-            # Fallback to main menu if something went wrong
+        # CRITICAL: Verify keyboard is not empty before creating markup
+        if not keyboard_rows or all(len(row) == 0 for row in keyboard_rows):
+            logger.error(f"Empty keyboard detected for user {cid}!")
             await bot.edit_message_text(
                 "❌ Tugmalar yaratishda xatolik.",
                 cid, search_msg.message_id,
@@ -988,8 +996,7 @@ async def download_single_track(cid, track, msg_id):
             # Start progress updater
             progress_task = asyncio.create_task(update_progress())
 
-            # Download
-            loop = asyncio.get_event_loop()
+            # Download using thread pool to not block other users
             info = None
 
             # Try multiple sources
@@ -1002,7 +1009,7 @@ async def download_single_track(cid, track, msg_id):
             for src in sources:
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = await loop.run_in_executor(None, lambda: ydl.extract_info(src, download=True))
+                        info = await run_in_thread(ydl.extract_info, src, download=True)
                     if info:
                         break
                 except Exception as e:
@@ -1154,25 +1161,24 @@ async def video_handler(m):
             asyncio.create_task(background_cleanup(output_path))
 
 async def run_ffmpeg_async(cmd):
-    """Run ffmpeg command asynchronously"""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=300))
+    """Run ffmpeg command asynchronously using thread pool"""
+    return await run_in_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=300)
 
 async def handle_video_to_mp3(cid, input_path, output_path, msg_id):
     """Convert video to MP3 - TURBO MODE with libmp3lame VBR"""
     try:
         await bot.edit_message_text("🎵 Audio ajratib olinmoqda...", cid, msg_id)
 
-        # TURBO FFmpeg command with libmp3lame VBR - faster and efficient
+        # TURBO FFmpeg command with libmp3lame VBR - maximum speed
         cmd = [
             "ffmpeg", "-y",
             "-i", input_path,
             "-vn",                      # No video
             "-acodec", "libmp3lame",   # Fast MP3 encoder
-            "-q:a", "2",               # VBR quality (0=best, 9=worst, 2=good balance)
+            "-q:a", "4",               # VBR quality 4 (faster than 2, good quality)
             "-ar", "44100",            # Sample rate
             "-ac", "2",                # Stereo
-            "-threads", "0",          # Use ALL CPU cores for speed
+            "-threads", "0",          # Use ALL CPU cores for maximum speed
             output_path
         ]
 
@@ -1210,12 +1216,13 @@ async def handle_video_to_mp3(cid, input_path, output_path, msg_id):
         await bot.edit_message_text(f"❌ Xatolik: {str(e)[:100]}", cid, msg_id)
 
 async def check_ffmpeg_installed():
-    """Check if ffmpeg is installed on the system - async"""
+    """Check if ffmpeg is installed on the system - async using thread pool"""
     try:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
+        result = await run_in_thread(
+            subprocess.run,
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            timeout=5
         )
         return result.returncode == 0
     except Exception:
@@ -1246,10 +1253,12 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             input_path
         ]
         try:
-            loop = asyncio.get_event_loop()
-            probe_result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
+            probe_result = await run_in_thread(
+                subprocess.run,
+                probe_cmd,
+                capture_output=True,
+                text=True,
+                timeout=10
             )
             dims = probe_result.stdout.strip().split('x')
             width, height = int(dims[0]), int(dims[1])
@@ -1272,7 +1281,7 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             "-c:v", "libx264",
             "-preset", "ultrafast",      # Maximum speed preset
             "-tune", "zerolatency",       # Ultra-low latency mode (key for speed)
-            "-crf", "32",                # Higher compression = smaller file = faster
+            "-crf", "20",                # Lower CRF = better quality, still fast with ultrafast
             "-threads", "0",              # ALL CPU cores
             "-c:a", "aac",
             "-b:a", "64k",               # Lower audio bitrate for speed
