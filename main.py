@@ -45,7 +45,21 @@ if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
         spotify_client = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
         logger.info("Spotify client initialized successfully")
     except Exception as e:
-        logger.warning(f"Failed to initialize Spotify client: {e}")
+        logger.error(f"SPOTIFY INIT ERROR: {e}")
+        logger.error(f"SPOTIFY_CLIENT_ID exists: {bool(SPOTIFY_CLIENT_ID)}")
+        logger.error(f"SPOTIFY_CLIENT_SECRET exists: {bool(SPOTIFY_CLIENT_SECRET)}")
+        spotify_client = None
+
+# Async helper for CPU-bound tasks
+async def run_in_thread(func, *args, **kwargs):
+    """Run function in thread pool using asyncio.to_thread (Python 3.9+)"""
+    try:
+        # Python 3.9+ has asyncio.to_thread
+        return await asyncio.to_thread(func, *args, **kwargs)
+    except AttributeError:
+        # Fallback for older Python versions
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 # Async bot instance
 bot = AsyncTeleBot(BOT_TOKEN)
@@ -808,20 +822,36 @@ async def handle_music_search(m):
             duration = format_duration(track['duration'])
             result_text += f"{i}. {artist} - {name} `[{duration}]`\n"
 
-        # Create inline keyboard with numbers 1-10
+        # Create inline keyboard with numbers 1-10 - VALIDATED (no empty rows)
         keyboard_rows = []
 
-        # Number buttons (2 rows of 5)
+        # Number buttons (2 rows of 5) - validated
         row1 = [types.InlineKeyboardButton(str(i), callback_data=f"music:{tracks[i-1]['id']}:{i}") for i in range(1, 6)]
         row2 = [types.InlineKeyboardButton(str(i), callback_data=f"music:{tracks[i-1]['id']}:{i}") for i in range(6, 11)]
-        keyboard_rows.append(row1)
-        keyboard_rows.append(row2)
 
-        # Navigation buttons
-        keyboard_rows.append([
-            types.InlineKeyboardButton("⬅️ Orqaga", callback_data="music:back"),
-            types.InlineKeyboardButton("❌ Yopish", callback_data="music:close")
-        ])
+        # Only add non-empty rows
+        if row1:
+            keyboard_rows.append(row1)
+        if row2:
+            keyboard_rows.append(row2)
+
+        # Navigation buttons - always ensure at least one button
+        nav_buttons = []
+        nav_buttons.append(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="music:back"))
+        nav_buttons.append(types.InlineKeyboardButton("❌ Yopish", callback_data="music:close"))
+
+        if nav_buttons:
+            keyboard_rows.append(nav_buttons)
+
+        # Final validation - ensure markup is not empty
+        if not keyboard_rows:
+            # Fallback to main menu if something went wrong
+            await bot.edit_message_text(
+                "❌ Tugmalar yaratishda xatolik.",
+                cid, search_msg.message_id,
+                reply_markup=main_menu()
+            )
+            return
 
         markup = types.InlineKeyboardMarkup(keyboard_rows)
 
@@ -879,11 +909,15 @@ async def music_callback_handler(call):
                 await bot.edit_message_text("❌ Qo'shiq ma'lumotlari topilmadi.", cid, msg_id)
                 return
 
-            # Update message to show loading
-            await bot.edit_message_text(
-                f"🎵 {track['artist']} - {track['name']}\n\n⏳ Yuklanmoqda...",
-                cid, msg_id
-            )
+            # Update message to show loading (try/except to handle message not modified error)
+            try:
+                await bot.edit_message_text(
+                    f"🎵 {track['artist']} - {track['name']}\n\n⏳ Yuklanmoqda...",
+                    cid, msg_id
+                )
+            except Exception:
+                # If edit fails, try to send new message or continue
+                pass
 
             # Download the track
             await download_single_track(cid, track, msg_id)
@@ -1125,19 +1159,20 @@ async def run_ffmpeg_async(cmd):
     return await loop.run_in_executor(None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=300))
 
 async def handle_video_to_mp3(cid, input_path, output_path, msg_id):
-    """Convert video to high quality MP3 - async version"""
+    """Convert video to MP3 - TURBO MODE with libmp3lame VBR"""
     try:
-        await bot.edit_message_text("🎵 Audio ajratib olinmoqda (320kbps)...", cid, msg_id)
+        await bot.edit_message_text("🎵 Audio ajratib olinmoqda...", cid, msg_id)
 
-        # FFmpeg command for high quality MP3 extraction
+        # TURBO FFmpeg command with libmp3lame VBR - faster and efficient
         cmd = [
             "ffmpeg", "-y",
             "-i", input_path,
-            "-vn",  # No video
-            "-ar", "44100",  # Sample rate
-            "-ac", "2",  # Stereo
-            "-b:a", "320k",  # Bitrate 320kbps
-            "-f", "mp3",
+            "-vn",                      # No video
+            "-acodec", "libmp3lame",   # Fast MP3 encoder
+            "-q:a", "2",               # VBR quality (0=best, 9=worst, 2=good balance)
+            "-ar", "44100",            # Sample rate
+            "-ac", "2",                # Stereo
+            "-threads", "0",          # Use ALL CPU cores for speed
             output_path
         ]
 
