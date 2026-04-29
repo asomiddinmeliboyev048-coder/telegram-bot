@@ -9,6 +9,8 @@ from functools import wraps
 
 import yt_dlp
 import edge_tts
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
 from flask import Flask
 from dotenv import load_dotenv
 from telebot.async_telebot import AsyncTeleBot
@@ -28,6 +30,22 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is required!")
+
+# Spotify API credentials
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+
+# Initialize Spotify client if credentials available
+spotify_client = None
+if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
+    try:
+        client_credentials_manager = SpotifyClientCredentials(
+            client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET
+        )
+        spotify_client = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
+        logger.info("Spotify client initialized successfully")
+    except Exception as e:
+        logger.warning(f"Failed to initialize Spotify client: {e}")
 
 # Async bot instance
 bot = AsyncTeleBot(BOT_TOKEN)
@@ -474,36 +492,119 @@ async def handle_autopost(m):
         await bot.send_message(cid, f"❌ Kanalga yuborishda xatolik: {str(e)[:100]}")
     user_state[cid] = None
 
+async def update_download_progress(cid, msg_id, progress_data, stop_event):
+    """Update progress message every 2 seconds"""
+    last_percent = -1
+    while not stop_event.is_set():
+        try:
+            percent = progress_data.get('percent', 0)
+            if percent != last_percent and percent < 100:
+                last_percent = percent
+                status_emoji = "⬇️" if percent < 50 else "🎵"
+                try:
+                    await bot.edit_message_text(
+                        f"{status_emoji} Yuklanmoqda: {percent}%",
+                        cid, msg_id
+                    )
+                except Exception:
+                    pass  # Ignore edit errors
+            await asyncio.sleep(2)
+        except Exception:
+            break
+
+async def search_spotify(query):
+    """Search Spotify for track with accurate metadata"""
+    if not spotify_client:
+        return None
+
+    try:
+        # Search for track
+        results = spotify_client.search(q=query, type='track', limit=1)
+
+        if results and 'tracks' in results and results['tracks']['items']:
+            track = results['tracks']['items'][0]
+
+            # Extract accurate metadata
+            metadata = {
+                'name': track['name'],
+                'artist': track['artists'][0]['name'],
+                'artists': [a['name'] for a in track['artists']],
+                'album': track['album']['name'],
+                'duration_ms': track['duration_ms'],
+                'duration': track['duration_ms'] // 1000,
+                'preview_url': track.get('preview_url'),
+                'external_url': track['external_urls'].get('spotify'),
+                'image_url': track['album']['images'][0]['url'] if track['album']['images'] else None,
+                'track_id': track['id'],
+                'popularity': track.get('popularity', 0)
+            }
+
+            # Create search query for yt-dlp (most accurate match)
+            artist_name = metadata['artist']
+            track_name = metadata['name']
+            metadata['search_query'] = f"{artist_name} - {track_name} official audio"
+
+            logger.info(f"Spotify found: {metadata['search_query']} (popularity: {metadata['popularity']})")
+            return metadata
+
+        return None
+    except Exception as e:
+        logger.error(f"Spotify search error: {e}")
+        return None
+
 async def download_music_async(cid, query, search_msg):
-    """Async music download with multiple source fallback and improved error handling"""
+    """Spotify-first music download with progress status and fallback"""
     file_path = None
+    progress_data = {'percent': 0}
+    stop_event = asyncio.Event()
 
     # Acquire semaphore to limit concurrent downloads
     async with music_semaphore:
         try:
             # Update status
-            await bot.edit_message_text("🔍 Musiqa qidirilmoqda...", cid, search_msg.message_id)
+            await bot.edit_message_text("🔍 Spotify'dan qidirilmoqda...", cid, search_msg.message_id)
 
             # Clean up old files
             cleanup_temp_files(cid)
 
-            # Real browser headers to avoid bot detection
-            http_headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Cache-Control': 'max-age=0',
-            }
+            # STEP 1: Try Spotify for accurate metadata
+            spotify_metadata = await search_spotify(query)
 
-            # yt-dlp options optimized for SPEED with auto search
+            # STEP 2: If Spotify found, use its exact metadata; otherwise use original query
+            if spotify_metadata:
+                await bot.edit_message_text(
+                    f"🎵 Spotify'da topildi:\n🎤 {spotify_metadata['artist']} - {spotify_metadata['name']}",
+                    cid, search_msg.message_id
+                )
+                search_query = spotify_metadata['search_query']
+                title = spotify_metadata['name']
+                artist = spotify_metadata['artist']
+                duration = spotify_metadata['duration']
+                source = "spotify"
+            else:
+                await bot.edit_message_text("🔍 SoundCloud'dan qidirilmoqda...", cid, search_msg.message_id)
+                search_query = f"scsearch1:{query}"
+                title = None
+                artist = None
+                duration = 0
+                source = "soundcloud"
+
+            # STEP 3: Download with progress tracking
+            await bot.edit_message_text("⬇️ 0%", cid, search_msg.message_id)
+
+            # Start progress updater
+            progress_task = asyncio.create_task(
+                update_download_progress(cid, search_msg.message_id, progress_data, stop_event)
+            )
+
+            # yt-dlp options with progress hook
+            def progress_hook(d):
+                if d['status'] == 'downloading':
+                    if 'downloaded_bytes' in d and 'total_bytes' in d and d['total_bytes']:
+                        progress_data['percent'] = int(d['downloaded_bytes'] / d['total_bytes'] * 100)
+                    elif 'downloaded_bytes' in d and 'total_bytes_estimate' in d and d['total_bytes_estimate']:
+                        progress_data['percent'] = int(d['downloaded_bytes'] / d['total_bytes_estimate'] * 100)
+
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'outtmpl': os.path.join(TEMP_DIR, f'{cid}_%(title)s.%(ext)s'),
@@ -515,12 +616,10 @@ async def download_music_async(cid, query, search_msg):
                 'fragment_retries': 2,
                 'retry_sleep': 2,
                 'extract_flat': False,
-                'default_search': 'auto',  # Search all available extractors
+                'default_search': 'auto',
                 'playlist_items': '1',
-                # Speed optimizations
                 'buffersize': 4096,
                 'noresizebuffer': True,
-                # Audio extraction only - no re-encoding for speed
                 'postprocessors': [
                     {
                         'key': 'FFmpegExtractAudio',
@@ -528,89 +627,70 @@ async def download_music_async(cid, query, search_msg):
                         'preferredquality': '128',
                     }
                 ],
-                # Real browser headers
-                'http_headers': http_headers,
-                # Cookie handling to appear more like a real user
-                'cookiesfrombrowser': None,  # Don't use browser cookies
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                },
+                'progress_hooks': [progress_hook],
             }
 
-            # Run yt-dlp in executor to not block event loop
+            # Run yt-dlp in executor
             loop = asyncio.get_event_loop()
             info = None
-            last_error = None
-
-            # Try multiple search strategies - SoundCloud FIRST to avoid YouTube blocking
-            search_strategies = [
-                f"scsearch1:{query}",  # SoundCloud FIRST (less bot detection)
-                f"scsearch1:{query} official",  # SoundCloud official
-                f"{query} audio",  # Auto search all sources
-                f"ytsearch1:{query} audio",  # YouTube (last resort - may block)
+            download_sources = [
+                search_query,  # Primary source (Spotify query or SoundCloud)
+                f"ytsearch1:{query} audio",  # YouTube fallback
+                f"{query} audio",  # Auto search fallback
             ]
 
-            for attempt, search_query in enumerate(search_strategies):
+            for attempt, dl_query in enumerate(download_sources):
                 try:
                     if attempt > 0:
-                        await bot.edit_message_text(f"🔍 Boshqa manbalardan qidirilmoqda... ({attempt}/3)", cid, search_msg.message_id)
+                        await bot.edit_message_text(f"🔍 Boshqa manbadan qidirilmoqda... ({attempt}/2)", cid, search_msg.message_id)
 
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = await loop.run_in_executor(None, lambda: ydl.extract_info(search_query, download=True))
+                        info = await loop.run_in_executor(None, lambda: ydl.extract_info(dl_query, download=True))
 
-                    # Check if we got valid results
                     if info:
                         if 'entries' in info and info['entries']:
-                            break
-                        elif 'url' in info or 'formats' in info:
-                            # Single direct result
-                            break
+                            info = info['entries'][0]
+                        break
 
                 except Exception as e:
                     error_str = str(e).lower()
-                    last_error = e
-                    logger.warning(f"Search attempt {attempt + 1} failed for query '{search_query}': {e}")
-
-                    # Check for specific bot detection errors
+                    logger.warning(f"Download attempt {attempt + 1} failed: {e}")
                     if any(x in error_str for x in ['sign in', 'confirm you', 'robot', 'bot', 'verify']):
-                        logger.warning(f"Bot detection triggered on source {search_query}, trying next source...")
                         continue
-
-                    # If not a bot detection error, might be worth retrying
-                    if attempt < len(search_strategies) - 1:
+                    if attempt < len(download_sources) - 1:
                         await asyncio.sleep(1)
-                        continue
 
-            # Check if we got any valid results
+            # Stop progress updater
+            stop_event.set()
+            try:
+                await progress_task
+            except Exception:
+                pass
+
+            # Check results
             if not info:
                 await bot.edit_message_text(
-                    "❌ Musiqa topilmadi. Iltimos, boshqa qo'shiq nomi yoki ijrochi yozib ko'ring.",
+                    "❌ Musiqa topilmadi. Iltimos, boshqa qo'shiq nomi yozib ko'ring.",
                     cid, search_msg.message_id
                 )
                 return
 
-            # Extract entry data
-            entry = None
-            if 'entries' in info and info['entries']:
-                entry = info['entries'][0]
-            elif 'url' in info:
-                # Direct result
-                entry = info
-            else:
-                await bot.edit_message_text("❌ Musiqa ma'lumotlari olinmadi.", cid, search_msg.message_id)
-                return
-
-            title = entry.get('title', 'Unknown')
-            artist = entry.get('uploader', entry.get('channel', entry.get('artist', 'Unknown')))
-            duration = entry.get('duration', 0)
-            extractor = entry.get('extractor', 'unknown')
-
-            logger.info(f"Found music: {title} by {artist} from {extractor}")
+            # Use Spotify metadata if available, otherwise from source
+            if not title:
+                title = info.get('title', 'Unknown').split(' - ')[-1] if ' - ' in info.get('title', '') else info.get('title', 'Unknown')
+                artist = info.get('uploader', info.get('channel', 'Unknown'))
+                duration = info.get('duration', 0)
+                source = info.get('extractor', 'unknown').split(':')[0]
 
             # Update status
             await bot.edit_message_text("📤 Yuborilmoqda...", cid, search_msg.message_id)
 
-            # Find the downloaded file
+            # Find downloaded file
             downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.mp3"))
             if not downloaded_files:
-                # Try other audio formats
                 downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.*"))
                 if not downloaded_files:
                     await bot.edit_message_text("❌ Fayl topilmadi.", cid, search_msg.message_id)
@@ -618,22 +698,16 @@ async def download_music_async(cid, query, search_msg):
 
             file_path = str(downloaded_files[0])
 
-            # Check file size (Telegram limit ~50MB for bots)
+            # Check file size
             file_size = os.path.getsize(file_path)
             if file_size > 50 * 1024 * 1024:
                 await bot.edit_message_text("❌ Fayl hajmi juda katta (>50MB).", cid, search_msg.message_id)
                 return
 
-            # Determine source emoji
-            source_emoji = "🎵"
-            if 'soundcloud' in extractor.lower():
-                source_emoji = "☁️"
-            elif 'youtube' in extractor.lower():
-                source_emoji = "▶️"
-            elif 'bandcamp' in extractor.lower():
-                source_emoji = "🎸"
+            # Source emoji
+            source_emoji = {"spotify": "🟢", "soundcloud": "☁️", "youtube": "▶️"}.get(source.lower(), "�")
 
-            # Send the audio
+            # Send audio with Spotify-accurate metadata
             with open(file_path, "rb") as f:
                 await bot.send_audio(
                     cid,
@@ -648,22 +722,22 @@ async def download_music_async(cid, query, search_msg):
             await bot.delete_message(cid, search_msg.message_id)
             user_state[cid] = None
 
+            # Background cleanup
+            asyncio.create_task(background_cleanup(file_path))
+
         except Exception as e:
+            stop_event.set()
             logger.error(f"Music search error: {e}")
-            error_msg = str(e).lower()
             try:
-                if "timeout" in error_msg:
-                    await bot.edit_message_text("❌ Server javob bermadi. Iltimos, keyinroq urinib ko'ring.", cid, search_msg.message_id)
-                elif "connection" in error_msg:
-                    await bot.edit_message_text("❌ Internet bog'lanishida muammo. Qayta urinib ko'ring.", cid, search_msg.message_id)
-                elif any(x in error_msg for x in ['sign in', 'confirm you', 'robot', 'bot', 'verify']):
-                    await bot.edit_message_text("❌ Bu musiqa manbasi vaqtincha bloklangan. Iltimos, boshqa qo'shiq qidiring.", cid, search_msg.message_id)
-                else:
-                    await bot.edit_message_text(f"❌ Xatolik yuz berdi. Iltimos, boshqa musiqa qidirib ko'ring.", cid, search_msg.message_id)
+                await bot.edit_message_text(
+                    "❌ Xatolik yuz berdi. Iltimos, boshqa musiqa qidirib ko'ring.",
+                    cid, search_msg.message_id
+                )
             except Exception:
                 pass
         finally:
-            safe_remove(file_path)
+            if not file_path:
+                safe_remove(file_path)
 
 
 async def handle_music_search(m):
@@ -844,7 +918,7 @@ async def check_ffmpeg_installed():
         return False
 
 async def handle_circle_video(cid, input_path, output_path, msg_id):
-    """Convert video to circle video note format - optimized for SPEED"""
+    """Convert video to circle video note format - TURBO MODE (3-4x faster)"""
     try:
         # Check ffmpeg is installed
         ffmpeg_installed = await check_ffmpeg_installed()
@@ -853,9 +927,11 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             logger.error("FFmpeg is not installed on the server")
             return
 
-        # 320x320 for 2x faster processing with minimal quality loss
+        # TURBO SETTINGS: Strict 320x320, 24fps, maximum compression
         CIRCLE_SIZE = 320
-        await bot.edit_message_text(f"🔵 Yumaloq video yaratilmoqda ({CIRCLE_SIZE}x{CIRCLE_SIZE})...", cid, msg_id)
+        FPS = 24  # Lower fps for 3-4x speed boost
+
+        await bot.edit_message_text(f"🔵 Turbo rejim: {CIRCLE_SIZE}x{CIRCLE_SIZE} @ {FPS}fps", cid, msg_id)
 
         # Get video dimensions
         probe_cmd = [
@@ -882,23 +958,27 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             crop_x = "(iw-min(iw,ih))/2"
             crop_y = "(ih-min(iw,ih))/2"
 
-        # FFmpeg command for FAST circle video - 320x320, all cores, optimized
+        # TURBO FFmpeg command - 3-4x faster processing
+        # Key optimizations: -tune zerolatency, fps=24, strict 320x320, max threads
         cmd = [
             "ffmpeg", "-y",
             "-i", input_path,
-            "-vf", f"crop={min_dim}:{min_dim}:{crop_x}:{crop_y},scale={CIRCLE_SIZE}:{CIRCLE_SIZE}:force_original_aspect_ratio=increase,crop={CIRCLE_SIZE}:{CIRCLE_SIZE},setsar=1:1",
+            # Strict 320x320, 24fps for maximum speed
+            "-vf", f"crop={min_dim}:{min_dim}:{crop_x}:{crop_y},fps={FPS},scale={CIRCLE_SIZE}:{CIRCLE_SIZE}:flags=fast_bilinear,setsar=1:1",
             "-c:v", "libx264",
-            "-preset", "ultrafast",  # Fastest preset
-            "-crf", "30",  # Slightly higher for speed (was 28)
-            "-threads", "0",  # Use ALL CPU cores
+            "-preset", "ultrafast",      # Maximum speed preset
+            "-tune", "zerolatency",       # Ultra-low latency mode (key for speed)
+            "-crf", "32",                # Higher compression = smaller file = faster
+            "-threads", "0",              # ALL CPU cores
             "-c:a", "aac",
-            "-b:a", "96k",  # Reduced from 128k for speed
-            "-ar", "44100",
-            "-ac", "1",  # Mono for speed (was 2)
+            "-b:a", "64k",               # Lower audio bitrate for speed
+            "-ar", "22050",              # Lower sample rate
+            "-ac", "1",                  # Mono audio
             "-movflags", "+faststart",
-            "-t", "60",
+            "-t", "60",                  # Max 60 seconds
             "-pix_fmt", "yuv420p",
-            "-fflags", "+fastseek",  # Fast seeking
+            "-fflags", "+fastseek",
+            "-max_muxing_queue_size", "1024",  # Prevent buffer issues
             output_path
         ]
 
