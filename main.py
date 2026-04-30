@@ -1556,6 +1556,14 @@ async def main():
         logger.info(f"🔧 Python version: check with python --version")
         logger.info("=" * 50)
         
+        # CRITICAL: Purge webhook and pending updates immediately after bot creation
+        try:
+            await bot.remove_webhook(drop_pending_updates=True)
+            logger.info("✅ Webhook purged, pending updates cleared")
+            print("✅ BOT TELEGRAM BILAN BOG'LANDI!")
+        except Exception as e:
+            logger.warning(f"⚠️ Webhook purge warning: {e}")
+        
         # Start Flask in separate thread FIRST (before polling) - Render requirement
         flask_started = run_flask_server()
         if flask_started:
@@ -1602,11 +1610,11 @@ async def main():
         logger.info(f"✅ Semaphores: video={video_semaphore._value}, music={music_semaphore._value}, circle={circle_semaphore._value}")
         logger.info("=" * 50)
 
-        # Start bot polling - PROFESSIONAL FIX: Only skip_pending parameter
+        # Start bot polling - EXPLICIT TIMEOUT SETTINGS
         while True:
             try:
                 logger.info("🔥 BOT IS RUNNING - Waiting for messages...")
-                await bot.infinity_polling(skip_pending=True)
+                await bot.infinity_polling(skip_pending=True, timeout=60, request_timeout=60)
             except Exception as e:
                 logger.error(f"❌ Polling error: {e}")
                 logger.info("🔄 Restarting polling in 5 seconds...")
