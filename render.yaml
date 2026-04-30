@@ -1,0 +1,30 @@
+# Render.com Deployment Configuration
+# Optimized for Telegram Bot performance
+
+services:
+  - type: worker
+    name: telegram-bot
+    runtime: python
+    plan: standard  # Upgrade to standard for better performance
+    buildCommand: |
+      apt-get update && apt-get install -y ffmpeg
+      pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: BOT_TOKEN
+        sync: false  # Set in Render dashboard
+      - key: SPOTIFY_CLIENT_ID
+        sync: false  # Optional
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false  # Optional
+      - key: RENDER
+        value: "true"
+    healthCheckPath: /
+    autoDeploy: true
+    # Resource optimization
+    disk:
+      name: temp-storage
+      mountPath: /tmp
+      sizeGB: 1  # 1GB temp storage for video processing

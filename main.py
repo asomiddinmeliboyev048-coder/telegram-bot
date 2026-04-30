@@ -1,3 +1,5 @@
+# ================= RENDER OPTIMIZED IMPORTS =================
+# Fast startup - lazy load heavy modules
 import asyncio
 import os
 import subprocess
@@ -5,24 +7,25 @@ import logging
 import tempfile
 import time
 from pathlib import Path
-from functools import wraps
 
-import yt_dlp
-import edge_tts
-import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
-from flask import Flask
 from dotenv import load_dotenv
 from telebot.async_telebot import AsyncTeleBot
 from telebot import types
 
-# ================= LOAD .ENV =================
+# Lazy imports - loaded only when needed
+yt_dlp = None
+edge_tts = None
+spotipy = None
+SpotifyClientCredentials = None
+
+# ================= FAST STARTUP =================
 load_dotenv()
 
-# ================= LOGGING =================
+# Optimize logging for Render
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(levelname)s - %(message)s',  # Simplified format
+    handlers=[logging.StreamHandler()]  # Console only for Render
 )
 logger = logging.getLogger(__name__)
 
@@ -31,33 +34,42 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is required!")
 
-# Spotify API credentials - Check environment variables
+# Optional: Spotify (not required for core functionality)
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-
-# Detailed logging for Render environment
-logger.info(f"ENV CHECK: SPOTIFY_CLIENT_ID set: {bool(SPOTIFY_CLIENT_ID)}")
-logger.info(f"ENV CHECK: SPOTIFY_CLIENT_SECRET set: {bool(SPOTIFY_CLIENT_SECRET)}")
-
-if not SPOTIFY_CLIENT_ID:
-    logger.error("❌ SPOTIFY_CLIENT_ID is MISSING in environment variables!")
-if not SPOTIFY_CLIENT_SECRET:
-    logger.error("❌ SPOTIFY_CLIENT_SECRET is MISSING in environment variables!")
-
-# Initialize Spotify client if credentials available
 spotify_client = None
+
+def lazy_load_modules():
+    """Lazy load heavy modules on first use"""
+    global yt_dlp, edge_tts, spotipy, SpotifyClientCredentials
+    if yt_dlp is None:
+        import yt_dlp as yd
+        yt_dlp = yd
+    if edge_tts is None:
+        import edge_tts as et
+        edge_tts = et
+    if spotipy is None and SpotifyClientCredentials is None:
+        try:
+            import spotipy as sp
+            from spotipy.oauth2 import SpotifyClientCredentials as scc
+            spotipy = sp
+            SpotifyClientCredentials = scc
+        except Exception:
+            pass
+    return yt_dlp, edge_tts
+
+# Initialize Spotify only if needed
 if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
     try:
-        client_credentials_manager = SpotifyClientCredentials(
-            client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET
-        )
-        spotify_client = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
-        logger.info("✅ Spotify client initialized successfully")
+        lazy_load_modules()
+        if SpotifyClientCredentials:
+            client_credentials_manager = SpotifyClientCredentials(
+                client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET
+            )
+            spotify_client = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
+            logger.info("✅ Spotify initialized")
     except Exception as e:
-        logger.error(f"❌ SPOTIFY INIT ERROR: {e}")
-        spotify_client = None
-else:
-    logger.warning("⚠️ Spotify client NOT initialized - credentials missing!")
+        logger.warning(f"Spotify init skipped: {e}")
 
 # Async helper for CPU-bound tasks
 async def run_in_thread(func, *args, **kwargs):
@@ -73,52 +85,84 @@ async def run_in_thread(func, *args, **kwargs):
 # Async bot instance
 bot = AsyncTeleBot(BOT_TOKEN)
 
-# Semaphore for limiting concurrent heavy tasks
-video_semaphore = asyncio.Semaphore(3)  # Reduced for queue-based processing
-music_semaphore = asyncio.Semaphore(10)
-circle_semaphore = asyncio.Semaphore(2)  # Separate for circle videos
+# RENDER OPTIMIZED: Lower semaphore limits for stability on shared CPU
+video_semaphore = asyncio.Semaphore(2)      # Was 3 - reduce memory pressure
+music_semaphore = asyncio.Semaphore(5)      # Was 10 - limit concurrent downloads
+circle_semaphore = asyncio.Semaphore(1)   # Was 2 - sequential processing
 
-TEMP_DIR = tempfile.gettempdir()
+# Use Render disk or system temp
+TEMP_DIR = os.getenv("RENDER_DISK_PATH", tempfile.gettempdir())
+logger.info(f"Using temp dir: {TEMP_DIR}")
 
 CHANNEL = -1003877967882
 OWNER_ID = 7171330738
 
-# User state storage
+# User state storage - with size limit for memory protection
 user_state = {}
 user_voice = {}
-
-# Track active user tasks for cleanup
 active_tasks = {}
 
-# Video processing queue for sequential but fast processing
-video_queue = asyncio.Queue()
+# Video processing queue
+video_queue = asyncio.Queue(maxsize=10)  # Limit queue size
 
-# Background cleanup task
+# ================= RENDER OPTIMIZED CLEANUP =================
+async def periodic_temp_cleanup():
+    """Periodic cleanup of old temp files - runs every 5 minutes"""
+    while True:
+        try:
+            await asyncio.sleep(300)  # 5 minutes
+            cleaned = 0
+            total_size = 0
+            
+            # Clean files older than 10 minutes
+            cutoff_time = time.time() - 600
+            
+            for file in Path(TEMP_DIR).glob("*"):
+                try:
+                    if file.is_file():
+                        file_time = file.stat().st_mtime
+                        file_size = file.stat().st_size
+                        
+                        if file_time < cutoff_time:
+                            file.unlink()
+                            cleaned += 1
+                        else:
+                            total_size += file_size
+                except Exception:
+                    pass
+            
+            # Log cleanup stats
+            if cleaned > 0:
+                logger.info(f"Cleaned {cleaned} old temp files")
+            if total_size > 100 * 1024 * 1024:  # 100MB
+                logger.warning(f"Temp dir large: {total_size / 1024 / 1024:.1f}MB")
+                
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
+
 async def background_cleanup(file_path, delay=5):
     """Cleanup files in background after delay seconds"""
     await asyncio.sleep(delay)
     safe_remove(file_path)
 
-# ================= TEMP FILE CLEANUP =================
 def cleanup_temp_files(cid):
     """Clean up temporary files for a user"""
-    patterns = [f"{cid}.*", f"{cid}_*"]
+    patterns = [f"{cid}.*", f"{cid}_*", f"music_{cid}_*"]
     for pattern in patterns:
         for file in Path(TEMP_DIR).glob(pattern):
             try:
                 file.unlink()
-                logger.info(f"Cleaned up: {file}")
-            except Exception as e:
-                logger.error(f"Error cleaning up {file}: {e}")
+                logger.info(f"Cleaned: {file.name}")
+            except Exception:
+                pass
 
 def safe_remove(filepath):
     """Safely remove a file if it exists"""
     try:
         if filepath and os.path.exists(filepath):
             os.remove(filepath)
-            logger.info(f"Removed: {filepath}")
-    except Exception as e:
-        logger.error(f"Error removing {filepath}: {e}")
+    except Exception:
+        pass
 
 # ================= FLASK (RENDER FIX) =================
 app = Flask(__name__)
@@ -364,6 +408,9 @@ async def text_handler(m):
 # ================= HELPER FUNCTIONS =================
 async def handle_tts(m):
     """Text to speech handler with funny voice support"""
+    # LAZY LOAD: Load edge_tts only when needed
+    lazy_load_modules()
+    
     cid = m.chat.id
     txt = m.text
     voice_type = user_voice.get(cid, "female")
@@ -577,6 +624,9 @@ async def search_spotify(query):
 
 async def download_music_async(cid, query, search_msg):
     """Spotify-first music download with progress status and fallback"""
+    # LAZY LOAD: Load yt_dlp only when needed
+    ydl_module, _ = lazy_load_modules()
+    
     file_path = None
     progress_data = {'percent': 0}
     stop_event = asyncio.Event()
@@ -770,110 +820,167 @@ def format_duration(seconds):
     secs = seconds % 60
     return f"{minutes:02d}:{secs:02d}"
 
-async def search_youtube_music(query, limit=8):
-    """Search YouTube Music as fallback when Spotify unavailable - FAST"""
+# ================= EXTREME SPEED MUSIC SEARCH (YouTube Only) =================
+# Search cache (5 minutes)
+_search_cache = {}
+_CACHE_TTL = 300
+
+# AUDIO FILE CACHE - avoid re-downloading same songs
+_audio_cache = {}  # url -> (file_path, timestamp)
+_AUDIO_CACHE_TTL = 600  # 10 minutes
+_audio_cache_lock = asyncio.Lock()
+
+def get_cached_search(query):
+    """Get cached search results if available and not expired"""
+    if query in _search_cache:
+        result, timestamp = _search_cache[query]
+        if time.time() - timestamp < _CACHE_TTL:
+            return result
+        del _search_cache[query]
+    return None
+
+def cache_search(query, results):
+    """Cache search results with timestamp"""
+    _search_cache[query] = (results, time.time())
+
+async def get_cached_audio(url):
+    """Get cached audio file if available"""
+    async with _audio_cache_lock:
+        if url in _audio_cache:
+            file_path, timestamp = _audio_cache[url]
+            if time.time() - timestamp < _AUDIO_CACHE_TTL:
+                if os.path.exists(file_path):
+                    logger.info(f"Audio cache hit: {url[:50]}...")
+                    return file_path
+            # Expired or file missing
+            del _audio_cache[url]
+    return None
+
+async def cache_audio(url, file_path):
+    """Cache audio file path"""
+    async with _audio_cache_lock:
+        _audio_cache[url] = (file_path, time.time())
+        logger.info(f"Audio cached: {url[:50]}...")
+
+async def search_music_ultrafast(query, limit=8):
+    """EXTREME SPEED music search - YouTube direct, no Spotify"""
+    # LAZY LOAD: Load yt_dlp only when needed
+    ydl_module, _ = lazy_load_modules()
+    
+    # Check cache first
+    cached = get_cached_search(query)
+    if cached:
+        logger.info(f"Cache hit for: {query}")
+        return cached
+
     try:
+        # ULTRA-FAST yt-dlp options - minimal overhead
         ydl_opts = {
             'format': 'bestaudio/best',
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
-            'socket_timeout': 10,
+            'socket_timeout': 8,      # Reduced timeout
             'retries': 1,
-            'extract_flat': True,  # Fast extraction without downloading
+            'extract_flat': True,     # FAST: no full extraction
+            'skip_download': True,    # FAST: skip download
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             },
         }
 
-        # Try YouTube search
-        search_query = f"ytsearch{limit}:{query} official audio"
+        # Direct YouTube search with multiple strategies
+        search_variants = [
+            f"ytsearch{limit}:{query} audio",
+            f"ytsearch{limit}:{query} official",
+            f"ytsearch{limit}:{query}",
+        ]
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            result = await run_in_thread(ydl.extract_info, search_query, download=False)
+        for search_query in search_variants:
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    result = await asyncio.wait_for(
+                        run_in_thread(ydl.extract_info, search_query, download=False),
+                        timeout=12  # Hard timeout
+                    )
 
-        if result and 'entries' in result and result['entries']:
-            tracks = []
-            for i, entry in enumerate(result['entries'][:limit], 1):
-                if not entry:
-                    continue
-                # Extract duration
-                duration = entry.get('duration', 0)
-                # Clean up title
-                title = entry.get('title', 'Unknown')
-                uploader = entry.get('uploader', 'Unknown')
+                if result and 'entries' in result and result['entries']:
+                    tracks = []
+                    seen = set()  # Deduplicate
 
-                tracks.append({
-                    'id': entry.get('id', f'yt_{i}'),
-                    'name': title,
-                    'artist': uploader,
-                    'artists_full': [uploader],
-                    'album': 'YouTube',
-                    'duration': int(duration) if duration else 0,
-                    'duration_ms': int(duration * 1000) if duration else 0,
-                    'preview_url': None,
-                    'spotify_url': entry.get('webpage_url', entry.get('url', '')),
-                    'popularity': 0,
-                    'thumbnail': entry.get('thumbnail', ''),
-                    'source': 'youtube'  # Mark as YouTube source
-                })
-            return tracks if tracks else None
+                    for entry in result['entries'][:limit]:
+                        if not entry:
+                            continue
+
+                        # Skip duplicates by video ID
+                        vid_id = entry.get('id')
+                        if vid_id in seen:
+                            continue
+                        seen.add(vid_id)
+
+                        # Extract info quickly
+                        title = entry.get('title', 'Unknown Track')
+                        uploader = entry.get('uploader', entry.get('channel', 'Unknown'))
+                        duration = entry.get('duration', 0)
+
+                        # Skip very short videos (likely not music)
+                        if duration and duration < 30:
+                            continue
+
+                        tracks.append({
+                            'id': vid_id,
+                            'name': title,
+                            'artist': uploader,
+                            'duration': int(duration) if duration else 0,
+                            'duration_ms': int(duration * 1000) if duration else 0,
+                            'url': entry.get('webpage_url', entry.get('url', '')),
+                            'thumbnail': entry.get('thumbnail', ''),
+                        })
+
+                    if tracks:
+                        cache_search(query, tracks)
+                        return tracks
+
+            except asyncio.TimeoutError:
+                logger.warning(f"Search timeout for: {search_query}")
+                continue
+            except Exception as e:
+                logger.warning(f"Search variant failed: {e}")
+                continue
+
         return None
     except Exception as e:
-        logger.error(f"YouTube music search error: {e}")
+        logger.error(f"Music search error: {e}")
         return None
 
+# Legacy function for compatibility - now routes to YouTube only
+async def search_youtube_music(query, limit=8):
+    """Legacy: Now uses ultrafast search"""
+    return await search_music_ultrafast(query, limit)
+
 async def search_spotify_top10(query):
-    """Search Spotify for top 10 tracks - with YouTube fallback"""
-    # Try Spotify first if available
-    if spotify_client:
-        try:
-            results = spotify_client.search(q=query, type='track', limit=10)
-
-            if results and 'tracks' in results and results['tracks']['items']:
-                tracks = []
-                for track in results['tracks']['items']:
-                    tracks.append({
-                        'id': track['id'],
-                        'name': track['name'],
-                        'artist': track['artists'][0]['name'],
-                        'artists_full': [a['name'] for a in track['artists']],
-                        'album': track['album']['name'],
-                        'duration': track['duration_ms'] // 1000,
-                        'duration_ms': track['duration_ms'],
-                        'preview_url': track.get('preview_url'),
-                        'spotify_url': track['external_urls'].get('spotify'),
-                        'popularity': track.get('popularity', 0),
-                        'thumbnail': track['album']['images'][0]['url'] if track['album']['images'] else None,
-                        'source': 'spotify'
-                    })
-                return tracks
-        except Exception as e:
-            logger.error(f"Spotify search error: {e}")
-
-    # Fallback to YouTube if Spotify fails or unavailable
-    logger.info(f"Using YouTube fallback for query: {query}")
-    return await search_youtube_music(query, limit=8)
+    """DEPRECATED: Use YouTube for extreme speed"""
+    return await search_music_ultrafast(query, limit=8)
 
 async def handle_music_search(m):
-    """Professional music search - Spotify top 10 with inline keyboard"""
+    """EXTREME SPEED music search - YouTube based, no Spotify"""
     cid = m.chat.id
-    query = m.text
+    query = m.text.strip()
     search_msg = None
 
     try:
         user_state[cid] = None  # Clear state immediately
 
         # Send searching message
-        search_msg = await bot.send_message(cid, "🔍 Spotify'dan qidirilmoqda...")
+        search_msg = await bot.send_message(cid, "🔍 Qidirilmoqda...")
 
-        # Search Spotify for top 10 results
-        tracks = await search_spotify_top10(query)
+        # EXTREME SPEED: YouTube search only (no slow Spotify)
+        tracks = await search_music_ultrafast(query, limit=8)
 
         # CRITICAL: Check if tracks is empty or None before creating keyboard
         if not tracks or len(tracks) == 0:
             await bot.edit_message_text(
-                "❌ Topilmadi",
+                "❌ Musiqa topilmadi. Boshqa qo'shiq nomini yozib ko'ring.",
                 cid, search_msg.message_id,
                 reply_markup=main_menu()
             )
@@ -889,18 +996,18 @@ async def handle_music_search(m):
             duration = format_duration(track['duration'])
             result_text += f"{i}. {artist} - {name} `[{duration}]`\n"
 
-        # Create inline keyboard with numbers 1-10 - PROFESSIONAL UI
+        # Create inline keyboard with numbers - FAST YouTube callback
         keyboard_rows = []
 
-        # Row 1: buttons 1-5 with sp_dl: prefix
+        # Row 1: buttons 1-4
         if len(tracks) >= 1:
-            row1 = [types.InlineKeyboardButton(str(i), callback_data=f"sp_dl:{tracks[i-1]['spotify_url']}") for i in range(1, min(6, len(tracks)+1))]
+            row1 = [types.InlineKeyboardButton(str(i), callback_data=f"dl:{tracks[i-1]['url']}") for i in range(1, min(5, len(tracks)+1))]
             if row1:
                 keyboard_rows.append(row1)
 
-        # Row 2: buttons 6-10 with sp_dl: prefix
-        if len(tracks) >= 6:
-            row2 = [types.InlineKeyboardButton(str(i), callback_data=f"sp_dl:{tracks[i-1]['spotify_url']}") for i in range(6, min(11, len(tracks)+1))]
+        # Row 2: buttons 5-8 (if available)
+        if len(tracks) >= 5:
+            row2 = [types.InlineKeyboardButton(str(i), callback_data=f"dl:{tracks[i-1]['url']}") for i in range(5, min(9, len(tracks)+1))]
             if row2:
                 keyboard_rows.append(row2)
 
@@ -922,8 +1029,8 @@ async def handle_music_search(m):
 
         markup = types.InlineKeyboardMarkup(keyboard_rows)
 
-        # Store minimal track data for quick lookup
-        user_state[cid + '_tracks'] = {t['spotify_url']: t for t in tracks}
+        # Store track data with URL as key
+        user_state[cid + '_tracks'] = {t['url']: t for t in tracks}
 
         await bot.edit_message_text(
             result_text,
@@ -946,9 +1053,9 @@ async def handle_music_search(m):
         except Exception:
             pass
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("sp_dl:"))
-async def download_spotify_url_handler(call):
-    """Handle download from Spotify URL - PROFESSIONAL"""
+@bot.callback_query_handler(func=lambda c: c.data.startswith("dl:"))
+async def download_url_handler(call):
+    """EXTREME SPEED: Handle download from YouTube URL"""
     cid = call.message.chat.id
     data = call.data
     msg_id = call.message.message_id
@@ -956,19 +1063,15 @@ async def download_spotify_url_handler(call):
     try:
         await bot.answer_callback_query(call.id)
 
-        # Extract Spotify URL from callback_data
-        spotify_url = data[6:]  # Remove "sp_dl:" prefix
+        url = data[3:]  # Remove "dl:" prefix
 
         # Get track info from stored data
         tracks_dict = user_state.get(cid + '_tracks', {})
-        track = tracks_dict.get(spotify_url)
+        track = tracks_dict.get(url)
 
         if not track:
-            # If not in memory, create basic info from URL
-            track_id = spotify_url.split('/')[-1].split('?')[0]
             track = {
-                'id': track_id,
-                'spotify_url': spotify_url,
+                'id': 'unknown',
                 'name': 'Track',
                 'artist': 'Unknown',
                 'duration': 0
@@ -977,17 +1080,17 @@ async def download_spotify_url_handler(call):
         # Update message to show loading
         try:
             await bot.edit_message_text(
-                f"🎵 {track['artist']} - {track['name']}\n\n⏳ Musiqa yuklanmoqda...",
+                f"🎵 {track['artist']} - {track['name']}\n\n⏳ Yuklanmoqda...",
                 cid, msg_id
             )
         except Exception:
             pass
 
-        # Download using Spotify URL via yt-dlp
-        await download_from_spotify_url(cid, track, spotify_url, msg_id)
+        # EXTREME SPEED: Direct download from URL
+        await download_track_ultrafast(cid, track, url, msg_id)
 
     except Exception as e:
-        logger.error(f"Spotify URL download error: {e}")
+        logger.error(f"Download error: {e}")
         await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
 
 @bot.callback_query_handler(func=lambda c: c.data in ["music:back", "music:close"])
@@ -1013,106 +1116,81 @@ async def music_navigation_handler(call):
     except Exception as e:
         logger.error(f"Navigation error: {e}")
 
-async def download_single_track(cid, track, msg_id):
-    """Download single track from Spotify metadata"""
+async def download_track_ultrafast(cid, track, url, msg_id):
+    """EXTREME SPEED: Download track with caching support"""
+    # LAZY LOAD: Load yt_dlp only when needed
+    ydl_module, _ = lazy_load_modules()
+    
     file_path = None
-    progress_data = {'percent': 0}
-    stop_event = asyncio.Event()
 
     async with music_semaphore:
         try:
-            # Create search query from Spotify metadata
-            search_query = f"{track['artist']} - {track['name']} official audio"
+            # CHECK AUDIO CACHE FIRST - instant response for repeated songs
+            cached_file = await get_cached_audio(url)
+            if cached_file:
+                await bot.edit_message_text("⚡ Keshdan yuborilmoqda...", cid, msg_id)
 
-            # Progress updater
-            async def update_progress():
-                last_percent = -1
-                while not stop_event.is_set():
-                    try:
-                        percent = progress_data.get('percent', 0)
-                        if percent != last_percent and percent < 100:
-                            last_percent = percent
-                            try:
-                                await bot.edit_message_text(
-                                    f"🎵 {track['artist']} - {track['name']}\n⬇️ {percent}%",
-                                    cid, msg_id
-                                )
-                            except Exception:
-                                pass
-                        await asyncio.sleep(2)
-                    except Exception:
-                        break
+                with open(cached_file, "rb") as f:
+                    await bot.send_audio(
+                        cid,
+                        f,
+                        title=track['name'],
+                        performer=track['artist'],
+                        duration=track['duration'],
+                        thumb=track.get('thumbnail') if track.get('thumbnail') else None,
+                        caption=f"🎵 {track['artist']} - {track['name']}\n⚡ Keshdan\n✅ @foyda1ii_bot",
+                        reply_markup=main_menu()
+                    )
 
-            # Progress hook for yt-dlp
-            def progress_hook(d):
-                if d['status'] == 'downloading':
-                    if 'downloaded_bytes' in d and 'total_bytes' in d and d['total_bytes']:
-                        progress_data['percent'] = int(d['downloaded_bytes'] / d['total_bytes'] * 100)
-                    elif 'downloaded_bytes' in d and 'total_bytes_estimate' in d:
-                        progress_data['percent'] = int(d['downloaded_bytes'] / d['total_bytes_estimate'] * 100)
+                await bot.delete_message(cid, msg_id)
+                return
 
+            # Not cached - proceed with download
             ydl_opts = {
                 'format': 'bestaudio/best',
-                'outtmpl': os.path.join(TEMP_DIR, f'{cid}_%(title)s.%(ext)s'),
+                'outtmpl': os.path.join(TEMP_DIR, f'music_{cid}_%(title)s.%(ext)s'),
                 'quiet': True,
                 'no_warnings': True,
                 'noplaylist': True,
-                'socket_timeout': 15,
+                'socket_timeout': 25,
                 'retries': 2,
+                'fragment_retries': 2,
                 'postprocessors': [
                     {
                         'key': 'FFmpegExtractAudio',
                         'preferredcodec': 'mp3',
-                        'preferredquality': '128',
+                        'preferredquality': '192',
                     }
                 ],
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 },
-                'progress_hooks': [progress_hook],
             }
 
-            # Start progress updater
-            progress_task = asyncio.create_task(update_progress())
-
-            # Download using thread pool to not block other users
-            info = None
-
-            # Try multiple sources
-            sources = [
-                search_query,
-                f"ytsearch1:{track['artist']} {track['name']}",
-                f"scsearch1:{track['artist']} {track['name']}",
-            ]
-
-            for src in sources:
-                try:
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = await run_in_thread(ydl.extract_info, src, download=True)
-                    if info:
-                        break
-                except Exception as e:
-                    logger.warning(f"Source failed {src}: {e}")
-                    continue
-
-            # Stop progress updater
-            stop_event.set()
+            # Update status
             try:
-                await progress_task
+                await bot.edit_message_text(
+                    f"🎵 {track['artist']} - {track['name']}\n\n⏳ Yuklanmoqda...",
+                    cid, msg_id
+                )
             except Exception:
                 pass
 
-            if not info:
-                await bot.edit_message_text(
-                    "❌ Yuklab olishda xatolik. Iltimos, boshqa qo'shiqni tanlang.",
-                    cid, msg_id
+            # Download with timeout protection
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = await asyncio.wait_for(
+                    run_in_thread(ydl.extract_info, url, download=True),
+                    timeout=120  # 2 minute max download
                 )
+
+            if not info:
+                await bot.edit_message_text("❌ Yuklab olishda xatolik.", cid, msg_id)
                 return
 
             # Find downloaded file
-            downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.mp3"))
+            downloaded_files = list(Path(TEMP_DIR).glob(f"music_{cid}_*.mp3"))
             if not downloaded_files:
-                downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.*"))
+                downloaded_files = list(Path(TEMP_DIR).glob(f"music_{cid}_*.*"))
 
             if not downloaded_files:
                 await bot.edit_message_text("❌ Fayl topilmadi.", cid, msg_id)
@@ -1123,7 +1201,11 @@ async def download_single_track(cid, track, msg_id):
             # Check file size
             if os.path.getsize(file_path) > 50 * 1024 * 1024:
                 await bot.edit_message_text("❌ Fayl hajmi juda katta (>50MB).", cid, msg_id)
+                safe_remove(file_path)
                 return
+
+            # Cache the file for future requests
+            await cache_audio(url, file_path)
 
             # Send audio
             await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
@@ -1135,25 +1217,28 @@ async def download_single_track(cid, track, msg_id):
                     title=track['name'],
                     performer=track['artist'],
                     duration=track['duration'],
-                    caption=f"🟢 {track['artist']} - {track['name']}\n✅ @foyda1ii_bot",
+                    thumb=track.get('thumbnail') if track.get('thumbnail') else None,
+                    caption=f"🎵 {track['artist']} - {track['name']}\n✅ @foyda1ii_bot",
                     reply_markup=main_menu()
                 )
 
             await bot.delete_message(cid, msg_id)
 
-            # Immediate cleanup
-            safe_remove(file_path)
-
+        except asyncio.TimeoutError:
+            logger.error(f"Download timeout for {url}")
+            await bot.edit_message_text("❌ Vaqt tugadi. Qayta urinib ko'ring.", cid, msg_id)
         except Exception as e:
-            logger.error(f"Download single track error: {e}")
-            await bot.edit_message_text(
-                "❌ Xatolik yuz berdi. Iltimos, boshqa qo'shiqni tanlang.",
-                cid, msg_id
-            )
-            safe_remove(file_path)
+            logger.error(f"Download error: {e}")
+            try:
+                await bot.edit_message_text(f"❌ Xatolik: {str(e)[:100]}", cid, msg_id)
+            except Exception:
+                pass
 
 async def download_from_spotify_url(cid, track, spotify_url, msg_id):
     """Download track from Spotify URL using yt-dlp - Tingla Bot style"""
+    # LAZY LOAD: Load yt_dlp only when needed
+    ydl_module, _ = lazy_load_modules()
+    
     file_path = None
     progress_data = {'percent': 0}
     stop_event = asyncio.Event()
@@ -1383,22 +1468,61 @@ async def run_ffmpeg_async(cmd):
     return await run_in_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=300)
 
 async def handle_video_to_mp3(cid, input_path, output_path, msg_id):
-    """Extract audio from video to MP3 - AUDIO-ONLY EXTRACTION (80% faster)"""
+    """MAX SPEED: Extract audio from video to MP3 - MINIMAL PROCESSING"""
     try:
-        await bot.edit_message_text("🎵 Audio ajratilmoqda...", cid, msg_id)
+        await bot.edit_message_text("⚡ MP3 yaratilmoqda...", cid, msg_id)
 
-        # FASTEST FFmpeg command - audio-only, no video processing at all
-        cmd = [
+        # MAX SPEED: Try copy audio first (no re-encode), fallback to fast encode
+        # First attempt: copy audio stream if already compatible
+        cmd_copy = [
             "ffmpeg", "-y",
+            "-hide_banner",
+            "-loglevel", "error",
             "-i", input_path,
-            "-vn",                     # No video (ignore video stream)
-            "-acodec", "libmp3lame",  # Fast MP3 encoder
-            "-q:a", "4",             # VBR quality 4 (fast, good quality)
-            "-threads", "0",          # All CPU cores
-            output_path
+            "-vn",                     # No video
+            "-c:a", "copy",           # COPY audio (fastest!)
+            "-map_metadata", "-1",    # Strip metadata
+            "-threads", "0",
+            output_path.replace('.mp3', '.aac')  # Try AAC first
         ]
 
-        result = await run_ffmpeg_async(cmd)
+        result = await run_ffmpeg_async(cmd_copy)
+
+        # If copy failed or file too small, do fast MP3 encode
+        aac_path = output_path.replace('.mp3', '.aac')
+        if result.returncode != 0 or not os.path.exists(aac_path) or os.path.getsize(aac_path) < 1000:
+            safe_remove(aac_path) if os.path.exists(aac_path) else None
+
+            # FAST MP3 encode - minimal quality for speed
+            cmd = [
+                "ffmpeg", "-y",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-i", input_path,
+                "-vn",                     # No video
+                "-acodec", "libmp3lame",
+                "-q:a", "5",              # Lower quality = faster (0-9, 5 is good balance)
+                "-ar", "44100",
+                "-ac", "2",
+                "-map_metadata", "-1",
+                "-threads", "0",
+                output_path
+            ]
+            result = await run_ffmpeg_async(cmd)
+        else:
+            # Convert AAC to MP3 quickly
+            cmd_convert = [
+                "ffmpeg", "-y",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-i", aac_path,
+                "-c:a", "libmp3lame",
+                "-q:a", "5",
+                "-threads", "0",
+                output_path
+            ]
+            await run_ffmpeg_async(cmd_convert)
+            safe_remove(aac_path)
 
         if result.returncode != 0:
             logger.error(f"FFmpeg error: {result.stderr}")
@@ -1409,7 +1533,7 @@ async def handle_video_to_mp3(cid, input_path, output_path, msg_id):
             await bot.edit_message_text("❌ Audio fayl yaratilmadi.", cid, msg_id)
             return
 
-        # Send audio immediately
+        # Send immediately
         await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
 
         with open(output_path, "rb") as f:
@@ -1430,9 +1554,13 @@ async def handle_video_to_mp3(cid, input_path, output_path, msg_id):
 
     except subprocess.TimeoutExpired:
         await bot.edit_message_text("❌ Vaqt tugadi. Video juda katta.", cid, msg_id)
+        safe_remove(input_path)
+        safe_remove(output_path)
     except Exception as e:
-        logger.error(f"MP3 conversion error: {e}")
+        logger.error(f"MP3 error: {e}")
         await bot.edit_message_text(f"❌ Xatolik: {str(e)[:100]}", cid, msg_id)
+        safe_remove(input_path)
+        safe_remove(output_path)
 
 async def check_ffmpeg_installed():
     """Check if ffmpeg is installed on the system - async using thread pool"""
@@ -1448,69 +1576,77 @@ async def check_ffmpeg_installed():
         return False
 
 async def handle_circle_video(cid, input_path, output_path, msg_id):
-    """Convert video to circle video note format - MAXIMUM SPEED MODE"""
+    """MAX SPEED: Convert video to circle video note - MINIMAL PROCESSING"""
     try:
-        # Check ffmpeg is installed
+        # Check ffmpeg installed
         ffmpeg_installed = await check_ffmpeg_installed()
         if not ffmpeg_installed:
-            await bot.edit_message_text("❌ Serverda ffmpeg o'rnatilmagan.", cid, msg_id)
+            await bot.edit_message_text("❌ FFmpeg o'rnatilmagan.", cid, msg_id)
             return
 
         # MAX SPEED SETTINGS
         CIRCLE_SIZE = 320
-        FPS = 24
+        FPS = 20  # Reduced from 24 for speed
 
-        await bot.edit_message_text(f"🔵 Ultra tezlik: {CIRCLE_SIZE}x{CIRCLE_SIZE} @ {FPS}fps", cid, msg_id)
+        await bot.edit_message_text("⚡ Video ishlanmoqda...", cid, msg_id)
 
-        # Simple center crop calculation
-        try:
-            probe_cmd = [
-                "ffprobe", "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=width,height",
-                "-of", "csv=s=x:p=0",
-                input_path
-            ]
-            probe_result = await run_in_thread(
-                subprocess.run, probe_cmd,
-                capture_output=True, text=True, timeout=5
-            )
-            dims = probe_result.stdout.strip().split('x')
-            width, height = int(dims[0]), int(dims[1])
-            min_dim = min(width, height)
-            crop_x = (width - min_dim) // 2
-            crop_y = (height - min_dim) // 2
-        except Exception:
-            min_dim = "min(iw,ih)"
-            crop_x = "(iw-min(iw,ih))/2"
-            crop_y = "(ih-min(iw,ih))/2"
+        # SKIP ffprobe - use ffmpeg expression syntax (faster!)
+        # Direct processing without probing dimensions
+        crop_filter = f"crop=min(iw\\,ih):min(iw\\,ih):(iw-min(iw\\,ih))/2:(ih-min(iw\\,ih))/2,fps={FPS},scale={CIRCLE_SIZE}:{CIRCLE_SIZE}:flags=lanczos"
 
-        # MAX SPEED FFmpeg command - simplified for Render
+        # MAX SPEED FFmpeg - prioritize speed over quality
         cmd = [
             "ffmpeg", "-y",
+            "-hide_banner",
+            "-loglevel", "error",
             "-i", input_path,
-            # Simplified filter: crop + fps + scale
-            "-vf", f"crop={min_dim}:{min_dim}:{crop_x}:{crop_y},fps={FPS},scale={CIRCLE_SIZE}:{CIRCLE_SIZE}",
+            # Fast filter: crop + fps + scale
+            "-vf", crop_filter,
             "-c:v", "libx264",
-            "-preset", "ultrafast",    # Maximum speed
-            "-tune", "zerolatency",     # Low latency
-            "-crf", "28",              # Balanced quality
-            "-threads", "0",           # All CPU cores
-            "-acodec", "copy",         # Copy audio without re-encoding (FAST!)
-            "-t", "60",                # Max 60 seconds
+            "-preset", "ultrafast",   # FASTEST preset
+            "-crf", "32",             # Higher CRF = faster, lower quality (acceptable)
+            "-pix_fmt", "yuv420p",
+            "-threads", "0",
+            # Copy audio if possible (much faster than re-encode)
+            "-c:a", "copy",
+            "-t", "60",               # Max 60 sec
             "-movflags", "+faststart",
             output_path
         ]
 
         result = await run_ffmpeg_async(cmd)
 
+        # If copy audio failed, retry with AAC
+        if result.returncode != 0:
+            logger.warning("Audio copy failed, trying AAC encode...")
+            cmd_audio = [
+                "ffmpeg", "-y",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-i", input_path,
+                "-vf", crop_filter,
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "32",
+                "-pix_fmt", "yuv420p",
+                "-threads", "0",
+                "-c:a", "aac",
+                "-b:a", "96k",           # Lower bitrate for speed
+                "-t", "60",
+                "-movflags", "+faststart",
+                output_path
+            ]
+            result = await run_ffmpeg_async(cmd_audio)
+
         if result.returncode != 0:
             logger.error(f"FFmpeg error: {result.stderr}")
             await bot.edit_message_text("❌ Video konvertatsiyada xatolik.", cid, msg_id)
+            safe_remove(input_path)
             return
 
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             await bot.edit_message_text("❌ Video fayl yaratilmadi.", cid, msg_id)
+            safe_remove(input_path)
             return
 
         # Send video note
@@ -1527,9 +1663,13 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
 
     except subprocess.TimeoutExpired:
         await bot.edit_message_text("❌ Vaqt tugadi. Video juda katta.", cid, msg_id)
+        safe_remove(input_path)
+        safe_remove(output_path)
     except Exception as e:
         logger.error(f"Circle video error: {e}")
         await bot.edit_message_text(f"❌ Xatolik: {str(e)[:100]}", cid, msg_id)
+        safe_remove(input_path)
+        safe_remove(output_path)
 
 # ================= AUTO POST (ASYNC) =================
 async def auto_post_loop():
@@ -1550,29 +1690,33 @@ async def auto_post_loop():
 
 # ================= RUN (ASYNC) =================
 async def main():
-    """Main async function"""
-    logger.info("Starting async bot...")
+    """Main async function - RENDER OPTIMIZED"""
+    logger.info("🚀 Starting Render-optimized bot...")
 
     # Remove webhook to prevent 409 Conflict errors on Render
     try:
         await bot.remove_webhook()
-        logger.info("✅ Webhook removed successfully")
+        logger.info("✅ Webhook removed")
     except Exception as e:
-        logger.warning(f"Webhook removal warning: {e}")
+        logger.warning(f"Webhook removal: {e}")
 
-    # Start auto post loop in background
+    # Start background tasks
     asyncio.create_task(auto_post_loop())
-
-    # Start video queue worker for sequential but fast circle video processing
     asyncio.create_task(video_queue_worker())
-    logger.info("Video queue worker started")
+    asyncio.create_task(periodic_temp_cleanup())  # NEW: Periodic cleanup
+    
+    logger.info("✅ Background tasks started")
+    logger.info(f"✅ Temp directory: {TEMP_DIR}")
+    logger.info(f"✅ Semaphores: video={video_semaphore._value}, music={music_semaphore._value}, circle={circle_semaphore._value}")
 
-    # Start bot polling with skip_pending to avoid processing old updates
+    # Start bot polling with optimized settings for Render
     while True:
         try:
-            logger.info("🔥 ASYNC BOT ISHLAYAPTI...")
+            logger.info("🔥 BOT IS RUNNING")
             await bot.infinity_polling(
-                skip_pending=True
+                skip_pending=True,
+                timeout=30,  # Faster timeout for Render
+                long_polling_timeout=10  # Reduce connection duration
             )
         except Exception as e:
             logger.error(f"Polling error: {e}")
