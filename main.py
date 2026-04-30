@@ -1611,6 +1611,8 @@ async def main():
         logger.info("=" * 50)
 
         # Start bot polling - EXPLICIT TIMEOUT SETTINGS
+        print("DEBUG: Polling boshlanmoqda...")
+        logger.info("DEBUG: Polling boshlanmoqda...")
         while True:
             try:
                 logger.info("🔥 BOT IS RUNNING - Waiting for messages...")
