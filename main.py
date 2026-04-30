@@ -1553,73 +1553,76 @@ async def main():
         logger.info("🚀 Starting bot on Render...")
         logger.info(f"🤖 Bot token: {BOT_TOKEN[:10]}...")
         logger.info(f"📁 Temp dir: {TEMP_DIR}")
-        logger.info(f"🔧 Python version: check with python --version")
         logger.info("=" * 50)
         
         # CRITICAL: Purge webhook and pending updates immediately after bot creation
+        print("[1/5] Webhook tozalanyapti...")
         try:
             await bot.remove_webhook(drop_pending_updates=True)
-            logger.info("✅ Webhook purged, pending updates cleared")
-            print("✅ BOT TELEGRAM BILAN BOG'LANDI!")
+            print("✅ [1/5] Webhook tozalandi!")
+            logger.info("✅ Webhook purged")
         except Exception as e:
-            logger.warning(f"⚠️ Webhook purge warning: {e}")
+            print(f"⚠️ [1/5] Webhook xato: {e}")
+            logger.warning(f"⚠️ Webhook: {e}")
         
         # Start Flask in separate thread FIRST (before polling) - Render requirement
-        flask_started = run_flask_server()
-        if flask_started:
-            logger.info("✅ Flask web server started for Render health check")
-        else:
-            logger.warning("⚠️ Flask not started - bot may restart on Render")
+        print("[2/5] Flask server ishga tushirilmoqda...")
+        try:
+            import threading
+            flask_thread = threading.Thread(target=run_flask_server, daemon=True)
+            flask_thread.start()
+            print("✅ [2/5] Flask thread ishga tushdi!")
+            logger.info("✅ Flask thread started")
+        except Exception as e:
+            print(f"⚠️ [2/5] Flask xato: {e}")
+            logger.warning(f"⚠️ Flask: {e}")
         
         # Test temp directory writable
+        print("[3/5] Temp directory tekshirilmoqda...")
         try:
             test_file = os.path.join(TEMP_DIR, "startup_test.tmp")
             with open(test_file, "w") as f:
                 f.write("test")
             os.remove(test_file)
-            logger.info("✅ Temp directory is writable")
+            print("✅ [3/5] Temp directory OK!")
+            logger.info("✅ Temp directory OK")
         except Exception as e:
-            logger.error(f"❌ Temp directory error: {e}")
+            print(f"⚠️ [3/5] Temp xato: {e}")
+            logger.error(f"❌ Temp: {e}")
         
-        # CRITICAL: Remove webhook to force fresh message polling
-        try:
-            await bot.remove_webhook()
-            logger.info("✅ Webhook removed, bot will use polling")
-        except Exception as e:
-            logger.warning(f"⚠️ Webhook removal: {e}")
-
-        # Start background tasks with error handling
+        print("[4/5] Background tasks ishga tushirilmoqda...")
         try:
             asyncio.create_task(auto_post_loop())
             logger.info("✅ Auto-post task started")
         except Exception as e:
-            logger.error(f"❌ Auto-post failed: {e}")
+            logger.error(f"❌ Auto-post: {e}")
             
         try:
             asyncio.create_task(video_queue_worker())
             logger.info("✅ Video queue worker started")
         except Exception as e:
-            logger.error(f"❌ Video queue failed: {e}")
+            logger.error(f"❌ Video queue: {e}")
             
         try:
             asyncio.create_task(periodic_temp_cleanup())
             logger.info("✅ Cleanup task started")
         except Exception as e:
-            logger.error(f"❌ Cleanup task failed: {e}")
+            logger.error(f"❌ Cleanup: {e}")
+        print("✅ [4/5] Background tasks ishga tushdi!")
         
-        logger.info(f"✅ Semaphores: video={video_semaphore._value}, music={music_semaphore._value}, circle={circle_semaphore._value}")
+        print("✅ [5/5] BOT TELEGRAM BILAN BOG'LANDI!")
         logger.info("=" * 50)
-
-        # Start bot polling - EXPLICIT TIMEOUT SETTINGS
-        print("DEBUG: Polling boshlanmoqda...")
-        logger.info("DEBUG: Polling boshlanmoqda...")
+        logger.info("🔥 BOT IS READY - STARTING POLLING")
+        
+        # Start bot polling - LAST STEP
+        print("🔥 BOT POLLING BOSHLANDI")
         while True:
             try:
-                logger.info("🔥 BOT IS RUNNING - Waiting for messages...")
+                print("🔥 Polling ishlamoqda... xabar kutilmoqda")
                 await bot.infinity_polling(skip_pending=True, timeout=60, request_timeout=60)
             except Exception as e:
                 logger.error(f"❌ Polling error: {e}")
-                logger.info("🔄 Restarting polling in 5 seconds...")
+                print(f"⚠️ Polling xato: {e}")
                 await asyncio.sleep(5)
                 
     except Exception as e:
