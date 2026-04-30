@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from telebot.async_telebot import AsyncTeleBot
+from telebot import TeleBot
 from telebot import types
 
 # Lazy imports - loaded only when needed
@@ -280,14 +280,14 @@ def voice_menu():
     return kb
 
 @bot.message_handler(func=lambda m: m.text == "⬅️ Orqaga")
-async def handle_back_button(m):
+def handle_back_button(m):
     """Handle back button from voice menu"""
     try:
         print(f"DEBUG: Back button from {m.chat.id}")
         cid = m.chat.id
         user_state[cid] = None
-        await bot.send_chat_action(cid, 'typing')
-        await bot.send_message(cid, "📋 Asosiy menu", reply_markup=main_menu())
+        bot.send_chat_action(cid, 'typing')
+        bot.send_message(cid, "📋 Asosiy menu", reply_markup=main_menu())
         print(f"DEBUG: Back button processed for {m.chat.id}")
     except Exception as e:
         print(f"ERROR in back button: {e}")
@@ -302,12 +302,12 @@ def admin_menu():
 
 # ================= START =================
 @bot.message_handler(commands=['start'])
-async def start(m):
+def start(m):
     """Minimal start handler for testing"""
     try:
         print(f"DEBUG: /start received from {m.chat.id}")
-        await bot.send_chat_action(m.chat.id, 'typing')
-        await bot.reply_to(m, 'Salom! Bot ishlayapti!')
+        bot.send_chat_action(m.chat.id, 'typing')
+        bot.reply_to(m, 'Salom! Bot ishlayapti!')
         print(f"DEBUG: /start reply sent to {m.chat.id}")
     except Exception as e:
         print(f"ERROR in start handler: {e}")
@@ -315,13 +315,13 @@ async def start(m):
 
 # ================= ADMIN =================
 @bot.message_handler(commands=['admin'])
-async def admin(m):
+def admin(m):
     """Admin panel"""
     try:
         print(f"DEBUG: /admin received from {m.chat.id}")
-        await bot.send_chat_action(m.chat.id, 'typing')
+        bot.send_chat_action(m.chat.id, 'typing')
         if m.from_user.id == OWNER_ID:
-            await bot.send_message(m.chat.id, "⚙️ Admin panel", reply_markup=admin_menu())
+            bot.send_message(m.chat.id, "⚙️ Admin panel", reply_markup=admin_menu())
         print(f"DEBUG: /admin processed for {m.chat.id}")
     except Exception as e:
         print(f"ERROR in admin handler: {e}")
@@ -1645,7 +1645,7 @@ if __name__ == "__main__":
     
     try:
         import traceback
-        asyncio.run(main())
+        main()
         print("✅ Bot finished normally")
     except KeyboardInterrupt:
         print("👋 Bot stopped by user")
