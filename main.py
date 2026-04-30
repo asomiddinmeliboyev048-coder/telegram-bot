@@ -770,34 +770,90 @@ def format_duration(seconds):
     secs = seconds % 60
     return f"{minutes:02d}:{secs:02d}"
 
-async def search_spotify_top10(query):
-    """Search Spotify for top 10 tracks"""
-    if not spotify_client:
-        return None
-
+async def search_youtube_music(query, limit=8):
+    """Search YouTube Music as fallback when Spotify unavailable - FAST"""
     try:
-        results = spotify_client.search(q=query, type='track', limit=10)
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+            'socket_timeout': 10,
+            'retries': 1,
+            'extract_flat': True,  # Fast extraction without downloading
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            },
+        }
 
-        if results and 'tracks' in results and results['tracks']['items']:
+        # Try YouTube search
+        search_query = f"ytsearch{limit}:{query} official audio"
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            result = await run_in_thread(ydl.extract_info, search_query, download=False)
+
+        if result and 'entries' in result and result['entries']:
             tracks = []
-            for track in results['tracks']['items']:
+            for i, entry in enumerate(result['entries'][:limit], 1):
+                if not entry:
+                    continue
+                # Extract duration
+                duration = entry.get('duration', 0)
+                # Clean up title
+                title = entry.get('title', 'Unknown')
+                uploader = entry.get('uploader', 'Unknown')
+
                 tracks.append({
-                    'id': track['id'],
-                    'name': track['name'],
-                    'artist': track['artists'][0]['name'],
-                    'artists_full': [a['name'] for a in track['artists']],
-                    'album': track['album']['name'],
-                    'duration': track['duration_ms'] // 1000,
-                    'duration_ms': track['duration_ms'],
-                    'preview_url': track.get('preview_url'),
-                    'spotify_url': track['external_urls'].get('spotify'),
-                    'popularity': track.get('popularity', 0)
+                    'id': entry.get('id', f'yt_{i}'),
+                    'name': title,
+                    'artist': uploader,
+                    'artists_full': [uploader],
+                    'album': 'YouTube',
+                    'duration': int(duration) if duration else 0,
+                    'duration_ms': int(duration * 1000) if duration else 0,
+                    'preview_url': None,
+                    'spotify_url': entry.get('webpage_url', entry.get('url', '')),
+                    'popularity': 0,
+                    'thumbnail': entry.get('thumbnail', ''),
+                    'source': 'youtube'  # Mark as YouTube source
                 })
-            return tracks
+            return tracks if tracks else None
         return None
     except Exception as e:
-        logger.error(f"Spotify top10 search error: {e}")
+        logger.error(f"YouTube music search error: {e}")
         return None
+
+async def search_spotify_top10(query):
+    """Search Spotify for top 10 tracks - with YouTube fallback"""
+    # Try Spotify first if available
+    if spotify_client:
+        try:
+            results = spotify_client.search(q=query, type='track', limit=10)
+
+            if results and 'tracks' in results and results['tracks']['items']:
+                tracks = []
+                for track in results['tracks']['items']:
+                    tracks.append({
+                        'id': track['id'],
+                        'name': track['name'],
+                        'artist': track['artists'][0]['name'],
+                        'artists_full': [a['name'] for a in track['artists']],
+                        'album': track['album']['name'],
+                        'duration': track['duration_ms'] // 1000,
+                        'duration_ms': track['duration_ms'],
+                        'preview_url': track.get('preview_url'),
+                        'spotify_url': track['external_urls'].get('spotify'),
+                        'popularity': track.get('popularity', 0),
+                        'thumbnail': track['album']['images'][0]['url'] if track['album']['images'] else None,
+                        'source': 'spotify'
+                    })
+                return tracks
+        except Exception as e:
+            logger.error(f"Spotify search error: {e}")
+
+    # Fallback to YouTube if Spotify fails or unavailable
+    logger.info(f"Using YouTube fallback for query: {query}")
+    return await search_youtube_music(query, limit=8)
 
 async def handle_music_search(m):
     """Professional music search - Spotify top 10 with inline keyboard"""
