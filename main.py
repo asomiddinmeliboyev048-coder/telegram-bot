@@ -164,29 +164,29 @@ def safe_remove(filepath):
     except Exception:
         pass
 
-# ================= OPTIONAL WEB SERVER (Render Health Check) =================
-# Flask is optional - bot works without it
+# ================= RENDER PORT BINDING (REQUIRED) =================
+# Bot must bind to a port to stay alive on Render
 try:
+    import os
     from flask import Flask
-    app = Flask(__name__)
+    from threading import Thread
 
+    app = Flask('')
     @app.route('/')
     def home():
-        return "Bot is running"
+        return "Bot is alive!"
 
-    def run_web():
-        port = int(os.environ.get("PORT", 10000))
-        app.run(host="0.0.0.0", port=port, threaded=True)
+    def run():
+        port = int(os.environ.get('PORT', 8080))
+        app.run(host='0.0.0.0', port=port)
 
-    # Start web server in background thread
-    import threading
-    threading.Thread(target=run_web, daemon=True).start()
-    logger.info("✅ Web server started for health checks")
+    Thread(target=run, daemon=True).start()
+    logger.info("✅ Port binding active (Render requirement)")
 except ImportError:
-    logger.warning("⚠️ Flask not installed - health check endpoint disabled")
-    logger.info("✅ Bot will still work normally without Flask")
+    logger.warning("⚠️ Flask not installed - port binding disabled")
+    logger.info("⚠️ Bot may restart on Render without port binding!")
 except Exception as e:
-    logger.error(f"❌ Web server error: {e}")
+    logger.error(f"❌ Port binding error: {e}")
 # =================================================================
 
 # ================= FORCE JOIN MIDDLEWARE =================
@@ -591,14 +591,14 @@ async def update_download_progress(cid, msg_id, progress_data, stop_event):
         except Exception:
             break
 
-async def search_spotify(query):
+async def search_spotify(query, limit=10):
     """Search Spotify for track with accurate metadata"""
     if not spotify_client:
         return None
 
     try:
         # Search for track
-        results = spotify_client.search(q=query, type='track', limit=1)
+        results = spotify_client.search(q=query, type='track', limit=limit)
 
         if results and 'tracks' in results and results['tracks']['items']:
             track = results['tracks']['items'][0]

@@ -10,10 +10,13 @@ edge-tts>=6.1.9
 python-dotenv>=1.0.0
 
 # Optional: Spotify (lazy loaded)
-spotipy>=2.23.0
+spotipy>=2.3.0
 
 # Async support (included with pyTelegramBotAPI)
 aiohttp>=3.9.0
 
-# Note: flask and requests removed - not needed for webhook-less bot
+# REQUIRED: Flask for Render port binding (keeps bot alive)
+flask>=3.0.0
+
+# Note: requests removed - not needed for webhook-less bot
 # Note: aiofiles removed - using built-in async methods
