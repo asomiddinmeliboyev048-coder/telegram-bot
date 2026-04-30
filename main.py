@@ -468,20 +468,19 @@ async def handle_tts(m):
             )
             return
 
-        # VENOM VOICE: Professional dark and scary effect
+        # VENOM VOICE: MAXIMUM SCARY EFFECT
         if voice_type == "venom":
             await bot.edit_message_text("🎭 Venom ovoz effekti qo'llanilmoqda...", cid, msg.message_id)
             
-            # PRO Venom effect: Darker, deeper, slightly slower, scary but clear
-            # asetrate=0.8 = 20% deeper pitch (not too extreme)
-            # atempo=0.88 = 12% slower (menacing but understandable)
-            # bass=g=8 = moderate bass boost
-            # aecho = subtle echo for depth
-            # lowpass = slight muffling for dark character
+            # MAXIMUM SCARY Venom effect: Deep pitch, heavy echo, boosted bass
+            # bass=g=12 = heavy bass boost (powerful)
+            # asetrate=44100*0.5 = 50% deeper pitch (very deep)
+            # atempo=2.0 = double speed compensation for asetrate
+            # aecho=0.8:0.88:60:0.4 = heavy echo for scary effect
             cmd_venom = [
                 "ffmpeg", "-y",
                 "-i", input_path,
-                "-af", "asetrate=44100*0.8,atempo=0.88,bass=g=8,aecho=0.6:0.7:35:0.3,lowpass=f=3200,highpass=f=80",
+                "-af", "bass=g=12,asetrate=44100*0.5,atempo=2.0,aecho=0.8:0.88:60:0.4",
                 "-ar", "44100",
                 "-ac", "1",
                 output_path
@@ -1527,6 +1526,7 @@ async def auto_post_loop():
                     except Exception as e:
                         logger.error(f"Auto post error for {u}: {e}")
         except Exception as e:
+            logger.error(f"Auto post loop error: {e}")
         await asyncio.sleep(3600)
 
 # ================= RUN (ASYNC) =================
