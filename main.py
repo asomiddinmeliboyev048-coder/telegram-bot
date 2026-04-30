@@ -15,8 +15,6 @@ from telebot import types
 # Lazy imports - loaded only when needed
 yt_dlp = None
 edge_tts = None
-spotipy = None
-SpotifyClientCredentials = None
 
 # ================= FAST STARTUP =================
 load_dotenv()
@@ -41,35 +39,16 @@ spotify_client = None
 
 def lazy_load_modules():
     """Lazy load heavy modules on first use"""
-    global yt_dlp, edge_tts, spotipy, SpotifyClientCredentials
+    global yt_dlp, edge_tts
     if yt_dlp is None:
         import yt_dlp as yd
         yt_dlp = yd
     if edge_tts is None:
         import edge_tts as et
         edge_tts = et
-    if spotipy is None and SpotifyClientCredentials is None:
-        try:
-            import spotipy as sp
-            from spotipy.oauth2 import SpotifyClientCredentials as scc
-            spotipy = sp
-            SpotifyClientCredentials = scc
-        except Exception:
-            pass
     return yt_dlp, edge_tts
 
-# Initialize Spotify only if needed
-if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
-    try:
-        lazy_load_modules()
-        if SpotifyClientCredentials:
-            client_credentials_manager = SpotifyClientCredentials(
-                client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET
-            )
-            spotify_client = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
-            logger.info("✅ Spotify initialized")
-    except Exception as e:
-        logger.warning(f"Spotify init skipped: {e}")
+# No Spotify - YouTube only for music
 
 # Async helper for CPU-bound tasks
 async def run_in_thread(func, *args, **kwargs):
@@ -274,6 +253,13 @@ def voice_menu():
     kb.add("⬅️ Orqaga")
     return kb
 
+@bot.message_handler(func=lambda m: m.text == "⬅️ Orqaga")
+async def handle_back_button(m):
+    """Handle back button from voice menu"""
+    cid = m.chat.id
+    user_state[cid] = None
+    await bot.send_message(cid, "📋 Asosiy menu", reply_markup=main_menu())
+
 def admin_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("📢 Broadcast","📊 Statistika")
@@ -362,6 +348,11 @@ async def text_handler(m):
                 user_voice[cid] = "male" if "Erkak" in txt else "female"
             user_state[cid] = "tts"
             await bot.send_message(cid, "✍️ Matn yuboring (o'zbek tilida):")
+            return
+
+        # SMART STATE: Check if user is in voice selection but hasn't chosen voice type
+        if state == "choose_voice":
+            await bot.send_message(cid, "⚠️ Iltimos, avval ovoz turini tanlang!", reply_markup=voice_menu())
             return
 
         if state == "tts":
@@ -465,11 +456,11 @@ async def handle_tts(m):
         if voice_type == "venom":
             await bot.edit_message_text("🎭 Venom ovoz effekti qo'llanilmoqda...", cid, msg.message_id)
             
-            # Venom effect: asetrate lowers pitch, atempo speeds up, vibrato adds scary modulation
+            # REAL Venom effect: MAXIMUM SCARY - deep pitch, heavy echo, boosted bass
             cmd_venom = [
                 "ffmpeg", "-y",
                 "-i", input_path,
-                "-af", "asetrate=44100*0.6,atempo=1.5,vibrato=f=10:d=0.5",
+                "-af", "bass=g=12,asetrate=44100*0.5,atempo=2.0,aecho=0.8:0.88:60:0.4",
                 "-ar", "44100",
                 "-ac", "1",
                 output_path
@@ -633,43 +624,10 @@ async def update_download_progress(cid, msg_id, progress_data, stop_event):
         except Exception:
             break
 
-async def search_spotify(query, limit=10):
-    """Search Spotify and return list of tracks"""
-    if not spotify_client:
-        return None
-
-    try:
-        # Search for tracks
-        results = spotify_client.search(q=query, type='track', limit=limit)
-
-        if results and 'tracks' in results and results['tracks']['items']:
-            tracks = []
-            for track in results['tracks']['items']:
-                metadata = {
-                    'name': track['name'],
-                    'artist': track['artists'][0]['name'],
-                    'artists': [a['name'] for a in track['artists']],
-                    'album': track['album']['name'],
-                    'duration_ms': track['duration_ms'],
-                    'duration': track['duration_ms'] // 1000,
-                    'preview_url': track.get('preview_url'),
-                    'external_url': track['external_urls'].get('spotify'),
-                    'spotify_url': track['external_urls'].get('spotify'),
-                    'image_url': track['album']['images'][0]['url'] if track['album']['images'] else None,
-                    'track_id': track['id'],
-                    'popularity': track.get('popularity', 0)
-                }
-                tracks.append(metadata)
-            logger.info(f"Spotify found {len(tracks)} tracks for: {query}")
-            return tracks
-
-        return None
-    except Exception as e:
-        logger.error(f"Spotify search error: {e}")
-        return None
+# YouTube only - No Spotify
 
 async def download_music_async(cid, query, search_msg):
-    """Spotify-first music download with progress status and fallback"""
+    """YouTube-only music download with progress status"""
     # LAZY LOAD: Load yt_dlp only when needed
     ydl_module, _ = lazy_load_modules()
     
@@ -681,32 +639,20 @@ async def download_music_async(cid, query, search_msg):
     async with music_semaphore:
         try:
             # Update status
-            await bot.edit_message_text("🔍 Spotify'dan qidirilmoqda...", cid, search_msg.message_id)
+            await bot.edit_message_text("🔍 YouTube'dan qidirilmoqda...", cid, search_msg.message_id)
 
             # Clean up old files
             cleanup_temp_files(cid)
 
-            # STEP 1: Try Spotify for accurate metadata
-            spotify_metadata = await search_spotify(query)
+            # STEP 1: Search YouTube
+            youtube_results = await search_music_ultrafast(query, limit=10)
 
-            # STEP 2: If Spotify found, use its exact metadata; otherwise use original query
-            if spotify_metadata:
-                await bot.edit_message_text(
-                    f"🎵 Spotify'da topildi:\n🎤 {spotify_metadata['artist']} - {spotify_metadata['name']}",
-                    cid, search_msg.message_id
-                )
-                search_query = spotify_metadata['search_query']
-                title = spotify_metadata['name']
-                artist = spotify_metadata['artist']
-                duration = spotify_metadata['duration']
-                source = "spotify"
-            else:
-                await bot.edit_message_text("🔍 SoundCloud'dan qidirilmoqda...", cid, search_msg.message_id)
-                search_query = f"scsearch1:{query}"
-                title = None
-                artist = None
-                duration = 0
-                source = "soundcloud"
+            # STEP 2: Use YouTube for download
+            search_query = f"ytsearch1:{query}"
+            title = None
+            artist = None
+            duration = 0
+            source = "youtube"
 
             # STEP 3: Download with progress tracking
             await bot.edit_message_text("⬇️ 0%", cid, search_msg.message_id)
@@ -735,7 +681,7 @@ async def download_music_async(cid, query, search_msg):
                 'fragment_retries': 2,
                 'retry_sleep': 2,
                 'extract_flat': False,
-                'default_search': 'auto',
+                'default_search': 'ytsearch',
                 'playlist_items': '1',
                 'buffersize': 4096,
                 'noresizebuffer': True,
@@ -755,7 +701,7 @@ async def download_music_async(cid, query, search_msg):
             # Run yt-dlp in thread pool for async operation
             info = None
             download_sources = [
-                search_query,  # Primary source (Spotify query or SoundCloud)
+                search_query,  # YouTube primary
                 f"ytsearch1:{query} audio",  # YouTube fallback
                 f"{query} audio",  # Auto search fallback
             ]
@@ -823,7 +769,7 @@ async def download_music_async(cid, query, search_msg):
                 return
 
             # Source emoji
-            source_emoji = {"spotify": "🟢", "soundcloud": "☁️", "youtube": "▶️"}.get(source.lower(), "🎵")
+            source_emoji = {"youtube": "▶️", "soundcloud": "☁️"}.get(source.lower(), "🎵")
 
             # Send audio with Spotify-accurate metadata
             with open(file_path, "rb") as f:
@@ -923,16 +869,11 @@ async def search_music_ultrafast(query, limit=10):
         # ULTRA-FAST yt-dlp options - minimal overhead
         ydl_opts = {
             'format': 'bestaudio/best',
-            'quiet': True,
-            'no_warnings': True,
             'noplaylist': True,
-            'socket_timeout': 8,      # Reduced timeout
-            'retries': 1,
+            'quiet': True,
+            'default_search': 'ytsearch10',
             'extract_flat': True,     # FAST: no full extraction
             'skip_download': True,    # FAST: skip download
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            },
         }
 
         # Direct YouTube search with multiple strategies
@@ -1217,264 +1158,6 @@ async def music_navigation_handler(call):
     except Exception as e:
         logger.error(f"Navigation error: {e}")
 
-async def download_track_ultrafast(cid, track, url, msg_id):
-    """EXTREME SPEED: Download track with caching support"""
-    # LAZY LOAD: Load yt_dlp only when needed
-    ydl_module, _ = lazy_load_modules()
-    
-    file_path = None
-
-    async with music_semaphore:
-        try:
-            # CHECK AUDIO CACHE FIRST - instant response for repeated songs
-            cached_file = await get_cached_audio(url)
-            if cached_file:
-                await bot.edit_message_text("⚡ Keshdan yuborilmoqda...", cid, msg_id)
-
-                with open(cached_file, "rb") as f:
-                    await bot.send_audio(
-                        cid,
-                        f,
-                        title=track['name'],
-                        performer=track['artist'],
-                        duration=track['duration'],
-                        thumb=track.get('thumbnail') if track.get('thumbnail') else None,
-                        caption=f"🎵 {track['artist']} - {track['name']}\n⚡ Keshdan\n✅ @foyda1ii_bot",
-                        reply_markup=main_menu()
-                    )
-
-                await bot.delete_message(cid, msg_id)
-                return
-
-            # Not cached - proceed with download
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': os.path.join(TEMP_DIR, f'music_{cid}_%(title)s.%(ext)s'),
-                'quiet': True,
-                'no_warnings': True,
-                'noplaylist': True,
-                'socket_timeout': 25,
-                'retries': 2,
-                'fragment_retries': 2,
-                'postprocessors': [
-                    {
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }
-                ],
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                },
-            }
-
-            # Update status
-            try:
-                await bot.edit_message_text(
-                    f"🎵 {track['artist']} - {track['name']}\n\n⏳ Yuklanmoqda...",
-                    cid, msg_id
-                )
-            except Exception:
-                pass
-
-            # Download with timeout protection
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.wait_for(
-                    run_in_thread(ydl.extract_info, url, download=True),
-                    timeout=120  # 2 minute max download
-                )
-
-            if not info:
-                await bot.edit_message_text("❌ Yuklab olishda xatolik.", cid, msg_id)
-                return
-
-            # Find downloaded file
-            downloaded_files = list(Path(TEMP_DIR).glob(f"music_{cid}_*.mp3"))
-            if not downloaded_files:
-                downloaded_files = list(Path(TEMP_DIR).glob(f"music_{cid}_*.*"))
-
-            if not downloaded_files:
-                await bot.edit_message_text("❌ Fayl topilmadi.", cid, msg_id)
-                return
-
-            file_path = str(downloaded_files[0])
-
-            # Check file size
-            if os.path.getsize(file_path) > 50 * 1024 * 1024:
-                await bot.edit_message_text("❌ Fayl hajmi juda katta (>50MB).", cid, msg_id)
-                safe_remove(file_path)
-                return
-
-            # Cache the file for future requests
-            await cache_audio(url, file_path)
-
-            # Send audio
-            await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
-
-            with open(file_path, "rb") as f:
-                await bot.send_audio(
-                    cid,
-                    f,
-                    title=track['name'],
-                    performer=track['artist'],
-                    duration=track['duration'],
-                    thumb=track.get('thumbnail') if track.get('thumbnail') else None,
-                    caption=f"🎵 {track['artist']} - {track['name']}\n✅ @foyda1ii_bot",
-                    reply_markup=main_menu()
-                )
-
-            await bot.delete_message(cid, msg_id)
-
-        except asyncio.TimeoutError:
-            logger.error(f"Download timeout for {url}")
-            await bot.edit_message_text("❌ Vaqt tugadi. Qayta urinib ko'ring.", cid, msg_id)
-        except Exception as e:
-            logger.error(f"Download error: {e}")
-            try:
-                await bot.edit_message_text(f"❌ Xatolik: {str(e)[:100]}", cid, msg_id)
-            except Exception:
-                pass
-
-async def download_from_spotify_url(cid, track, spotify_url, msg_id):
-    """Download track from Spotify URL using yt-dlp - Tingla Bot style"""
-    # LAZY LOAD: Load yt_dlp only when needed
-    ydl_module, _ = lazy_load_modules()
-    
-    file_path = None
-    progress_data = {'percent': 0}
-    stop_event = asyncio.Event()
-
-    async with music_semaphore:
-        try:
-            # Progress updater
-            async def update_progress():
-                last_percent = -1
-                while not stop_event.is_set():
-                    try:
-                        percent = progress_data.get('percent', 0)
-                        if percent != last_percent and percent < 100:
-                            last_percent = percent
-                            try:
-                                await bot.edit_message_text(
-                                    f"🎵 {track['artist']} - {track['name']}\n⬇️ {percent}%",
-                                    cid, msg_id
-                                )
-                            except Exception:
-                                pass
-                        await asyncio.sleep(2)
-                    except Exception:
-                        break
-
-            # Progress hook for yt-dlp
-            def progress_hook(d):
-                if d['status'] == 'downloading':
-                    if 'downloaded_bytes' in d and 'total_bytes' in d and d['total_bytes']:
-                        progress_data['percent'] = int(d['downloaded_bytes'] / d['total_bytes'] * 100)
-                    elif 'downloaded_bytes' in d and 'total_bytes_estimate' in d:
-                        progress_data['percent'] = int(d['downloaded_bytes'] / d['total_bytes_estimate'] * 100)
-
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': os.path.join(TEMP_DIR, f'{cid}_%(title)s.%(ext)s'),
-                'quiet': True,
-                'no_warnings': True,
-                'noplaylist': True,
-                'socket_timeout': 15,
-                'retries': 2,
-                'postprocessors': [
-                    {
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '128',
-                    }
-                ],
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                },
-                'progress_hooks': [progress_hook],
-            }
-
-            # Start progress updater
-            progress_task = asyncio.create_task(update_progress())
-
-            # Download from Spotify URL using yt-dlp (it can handle Spotify links via search)
-            # Actually use search since yt-dlp doesn't directly download from Spotify
-            search_query = f"{track['artist']} - {track['name']} official audio" if track['artist'] != 'Unknown' else spotify_url
-
-            info = None
-            sources = [
-                search_query,
-                f"ytsearch1:{track.get('artist', '')} {track.get('name', '')}",
-                f"scsearch1:{track.get('artist', '')} {track.get('name', '')}",
-            ]
-
-            for src in sources:
-                try:
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = await run_in_thread(ydl.extract_info, src, download=True)
-                    if info:
-                        break
-                except Exception as e:
-                    logger.warning(f"Source failed {src}: {e}")
-                    continue
-
-            # Stop progress updater
-            stop_event.set()
-            try:
-                await progress_task
-            except Exception:
-                pass
-
-            if not info:
-                await bot.edit_message_text(
-                    "❌ Yuklab olishda xatolik. Iltimos, boshqa qo'shiqni tanlang.",
-                    cid, msg_id
-                )
-                return
-
-            # Find downloaded file
-            downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.mp3"))
-            if not downloaded_files:
-                downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.*"))
-
-            if not downloaded_files:
-                await bot.edit_message_text("❌ Fayl topilmadi.", cid, msg_id)
-                return
-
-            file_path = str(downloaded_files[0])
-
-            # Check file size
-            if os.path.getsize(file_path) > 50 * 1024 * 1024:
-                await bot.edit_message_text("❌ Fayl hajmi juda katta (>50MB).", cid, msg_id)
-                return
-
-            # Send audio
-            await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
-
-            with open(file_path, "rb") as f:
-                await bot.send_audio(
-                    cid,
-                    f,
-                    title=track.get('name', 'Track'),
-                    performer=track.get('artist', 'Unknown'),
-                    duration=track.get('duration', 0),
-                    caption=f"🟢 {track.get('artist', 'Unknown')} - {track.get('name', 'Track')}\n✅ @foyda1ii_bot",
-                    reply_markup=main_menu()
-                )
-
-            await bot.delete_message(cid, msg_id)
-
-            # Immediate cleanup
-            safe_remove(file_path)
-
-        except Exception as e:
-            logger.error(f"Download from URL error: {e}")
-            await bot.edit_message_text(
-                "❌ Xatolik yuz berdi. Iltimos, boshqa qo'shiqni tanlang.",
-                cid, msg_id
-            )
-            safe_remove(file_path)
-
 async def download_youtube_audio(cid, track, url, msg_id):
     """YouTube'dan faqat audio (MP3) formatida yuklash"""
     # LAZY LOAD: Load yt_dlp only when needed
@@ -1756,7 +1439,7 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
         # YASHIN TEZLIGI: Render server uchun maksimal tezlik
         await bot.edit_message_text("⚡ Video ishlanmoqda...", cid, msg_id)
 
-        # EXACT ffmpeg parameters requested by user
+        # EXACT ffmpeg parameters requested by user + pix_fmt for compatibility
         cmd = [
             "ffmpeg", "-y",
             "-hide_banner",
@@ -1769,6 +1452,7 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             "-threads", "0",          # Barcha CPU yadrolaridan foydalanish
             "-crf", "28",             # Sifat va tezlik balansi
             "-s", "320x320",          # Aniq o'lcham (user talabi)
+            "-pix_fmt", "yuv420p",    # Codec compatibility
             # Audio copy (tezroq)
             "-c:a", "copy",
             "-t", "60",               # Maksimum 60 soniya
@@ -1792,6 +1476,7 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
                 "-threads", "0",
                 "-crf", "28",
                 "-s", "320x320",
+                "-pix_fmt", "yuv420p",   # Codec compatibility
                 "-c:a", "aac",
                 "-b:a", "96k",
                 "-t", "60",
