@@ -160,46 +160,35 @@ def safe_remove(filepath):
         pass
 
 # ================= RENDER PORT BINDING (REQUIRED) =================
-# Flask health check - runs before bot polling to prevent Render timeout
-import os
-from threading import Thread
-
-try:
-    from flask import Flask
-    app = Flask('')
-
-    @app.route('/')
-    def home():
-        return "Bot is running!"
-
-    def run():
-        port = int(os.environ.get('PORT', 8080))
-        app.run(host='0.0.0.0', port=port)
-
-    Thread(target=run, daemon=True).start()
-    logger.info("✅ Flask health check active on port %s", os.environ.get('PORT', 8080))
-except ImportError:
-    logger.warning("⚠️ Flask not installed - health check disabled")
-    logger.info("⚠️ Bot may restart on Render without health check!")
-except Exception as e:
-    logger.error(f"❌ Port binding error: {e}")
-# =================================================================
-
-# Flask web server function for main() to call
-def run_web_server():
-    """Run Flask web server for Render health check"""
+# Flask health check - ONLY runs in if __name__ == '__main__' block
+# This prevents double startup when module is imported
+def run_flask_server():
+    """Run Flask web server for Render health check - called once in main()"""
     try:
+        import os
         from flask import Flask
+        from threading import Thread
+        
         app = Flask(__name__)
         
         @app.route('/')
         def home():
             return "Bot is running!"
         
-        port = int(os.environ.get('PORT', 8080))
-        app.run(host='0.0.0.0', port=port, threaded=True)
+        port = int(os.environ.get('PORT', 10000))  # Render default port
+        
+        def run():
+            app.run(host='0.0.0.0', port=port, threaded=True, debug=False)
+        
+        Thread(target=run, daemon=True).start()
+        logger.info(f"✅ Flask health check active on port {port}")
+        return True
+    except ImportError:
+        logger.warning("⚠️ Flask not installed - health check disabled")
+        return False
     except Exception as e:
-        logger.error(f"Flask server error: {e}")
+        logger.error(f"❌ Flask startup error: {e}")
+        return False
 
 # ================= FORCE JOIN MIDDLEWARE =================
 async def check_subscription(user_id):
@@ -349,7 +338,8 @@ async def text_handler(m):
     """Main text message handler with voice menu support"""
     cid = m.chat.id
     txt = m.text
-    logger.info(f"📩 [TEXT] User: {cid}, Text: {txt[:50]}...")
+    # Log every incoming message
+    logger.info(f"📩 [MESSAGE] User: {cid}, Text: {txt[:100]}")
     user_id = m.from_user.id
     state = user_state.get(cid)
 
@@ -1566,14 +1556,12 @@ async def main():
         logger.info(f"🔧 Python version: check with python --version")
         logger.info("=" * 50)
         
-        # Start Flask in separate thread FIRST (before polling)
-        try:
-            import threading
-            flask_thread = threading.Thread(target=run_web_server, daemon=True)
-            flask_thread.start()
-            logger.info("✅ Flask web server started in separate thread (port 8080)")
-        except Exception as e:
-            logger.error(f"❌ Flask startup failed: {e}")
+        # Start Flask in separate thread FIRST (before polling) - Render requirement
+        flask_started = run_flask_server()
+        if flask_started:
+            logger.info("✅ Flask web server started for Render health check")
+        else:
+            logger.warning("⚠️ Flask not started - bot may restart on Render")
         
         # Test temp directory writable
         try:
@@ -1585,10 +1573,10 @@ async def main():
         except Exception as e:
             logger.error(f"❌ Temp directory error: {e}")
         
-        # CRITICAL: Remove webhook with drop_pending_updates to force fresh message polling
+        # CRITICAL: Remove webhook to force fresh message polling
         try:
-            await bot.remove_webhook(drop_pending_updates=True)
-            logger.info("✅ Webhook removed, pending updates dropped")
+            await bot.remove_webhook()
+            logger.info("✅ Webhook removed, bot will use polling")
         except Exception as e:
             logger.warning(f"⚠️ Webhook removal: {e}")
 
