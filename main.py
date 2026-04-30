@@ -1,3 +1,6 @@
+# ================= IMMEDIATE DEBUG =================
+print("DEBUG: Kod o'qilmoqda...")
+
 # ================= RENDER OPTIMIZED IMPORTS =================
 # Fast startup - lazy load heavy modules
 import asyncio
@@ -6,6 +9,7 @@ import subprocess
 import logging
 import tempfile
 import time
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -18,6 +22,7 @@ edge_tts = None
 
 # ================= FAST STARTUP =================
 load_dotenv()
+print("DEBUG: Environment yuklandi...")
 
 # Optimize logging for Render
 logging.basicConfig(
@@ -277,9 +282,16 @@ def voice_menu():
 @bot.message_handler(func=lambda m: m.text == "⬅️ Orqaga")
 async def handle_back_button(m):
     """Handle back button from voice menu"""
-    cid = m.chat.id
-    user_state[cid] = None
-    await bot.send_message(cid, "📋 Asosiy menu", reply_markup=main_menu())
+    try:
+        print(f"DEBUG: Back button from {m.chat.id}")
+        cid = m.chat.id
+        user_state[cid] = None
+        await bot.send_chat_action(cid, 'typing')
+        await bot.send_message(cid, "📋 Asosiy menu", reply_markup=main_menu())
+        print(f"DEBUG: Back button processed for {m.chat.id}")
+    except Exception as e:
+        print(f"ERROR in back button: {e}")
+        logger.error(f"Back button error: {e}")
 
 def admin_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -291,33 +303,14 @@ def admin_menu():
 # ================= START =================
 @bot.message_handler(commands=['start'])
 async def start(m):
-    """Start command handler"""
-    logger.info(f"📩 [START] User: {m.chat.id}, Username: {m.from_user.username if m.from_user else 'N/A'}")
-    cid = m.chat.id
-    user_id = m.from_user.id
-
+    """Minimal start handler for testing"""
     try:
-        # Real-time subscription check (no caching)
-        is_subscribed = await check_subscription(user_id)
-
-        if not is_subscribed:
-            # Not subscribed - show subscription prompt
-            kb = types.InlineKeyboardMarkup()
-            kb.add(types.InlineKeyboardButton("📢 Obuna bo'lish", url="https://t.me/meliboyevdev"))
-            kb.add(types.InlineKeyboardButton("✅ Tekshirish", callback_data="check"))
-            await bot.send_message(cid, "❗️ Kanalga a'zo bo'ling:", reply_markup=kb)
-            return
-
-        # Subscribed - show main menu immediately
-        save_user(cid)
-        user_state[cid] = None
-        await bot.send_message(cid, "🔥 BOTGA XUSH KELIBSIZ\n\n"
-                                  "🎤 Matnni ovozga o'girish\n"
-                                  "🎬 Video dan MP3 ajratish\n"
-                                  "🎧 YouTube dan musiqa yuklash\n"
-                                  "🔵 Yumaloq video yaratish",
-                               reply_markup=main_menu())
+        print(f"DEBUG: /start received from {m.chat.id}")
+        await bot.send_chat_action(m.chat.id, 'typing')
+        await bot.reply_to(m, 'Salom! Bot ishlayapti!')
+        print(f"DEBUG: /start reply sent to {m.chat.id}")
     except Exception as e:
+        print(f"ERROR in start handler: {e}")
         logger.error(f"Start error: {e}")
 
 # ================= ADMIN =================
@@ -325,9 +318,13 @@ async def start(m):
 async def admin(m):
     """Admin panel"""
     try:
+        print(f"DEBUG: /admin received from {m.chat.id}")
+        await bot.send_chat_action(m.chat.id, 'typing')
         if m.from_user.id == OWNER_ID:
             await bot.send_message(m.chat.id, "⚙️ Admin panel", reply_markup=admin_menu())
+        print(f"DEBUG: /admin processed for {m.chat.id}")
     except Exception as e:
+        print(f"ERROR in admin handler: {e}")
         logger.error(f"Admin error: {e}")
 
 AUTO_POST_TEXT = None
@@ -1547,6 +1544,13 @@ async def main():
             print("💥 Please set BOT_TOKEN in Render dashboard environment variables")
             raise ValueError("BOT_TOKEN environment variable is required!")
         
+        # Validate BOT_TOKEN before creating bot
+        if not BOT_TOKEN:
+            print("DEBUG: TOKEN TOPILMADI!")
+            raise ValueError("TOKEN TOPILMADI!")
+        
+        print(f"DEBUG: Token tekshirildi: {BOT_TOKEN[:10]}...")
+        
         # Initialize bot with async mode
         from telebot.async_telebot import AsyncTeleBot
         bot = AsyncTeleBot(BOT_TOKEN)
@@ -1616,6 +1620,7 @@ async def main():
         
         # Start bot polling - LAST STEP
         print("🔥 BOT POLLING BOSHLANDI")
+        sys.stdout.flush()  # Force Render to show logs immediately
         while True:
             try:
                 print("🔥 Polling ishlamoqda... xabar kutilmoqda")
