@@ -270,8 +270,8 @@ def main_menu():
 def voice_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("👨 Erkak ovoz", "👩 Ayol ovoz")
-    kb.add("🤡 Kulgili ovoz")
-    kb.add("🔙 Orqaga")
+    kb.add("🤡 Kulgili ovoz", "🎭 Venom ovoz")
+    kb.add("⬅️ Orqaga")
     return kb
 
 def admin_menu():
@@ -353,9 +353,11 @@ async def text_handler(m):
             await bot.send_message(cid, "👇 Ovoz tanlang:", reply_markup=voice_menu())
             return
 
-        if txt in ["👨 Erkak ovoz", "👩 Ayol ovoz", "🤡 Kulgili ovoz"]:
+        if txt in ["👨 Erkak ovoz", "👩 Ayol ovoz", "🤡 Kulgili ovoz", "🎭 Venom ovoz"]:
             if "Kulgili" in txt:
                 user_voice[cid] = "funny"
+            elif "Venom" in txt or "🎭" in txt:
+                user_voice[cid] = "venom"
             else:
                 user_voice[cid] = "male" if "Erkak" in txt else "female"
             user_state[cid] = "tts"
@@ -417,7 +419,7 @@ async def text_handler(m):
 
 # ================= HELPER FUNCTIONS =================
 async def handle_tts(m):
-    """Text to speech handler with funny voice support"""
+    """Text to speech handler with funny and venom voice support"""
     # LAZY LOAD: Load edge_tts only when needed
     lazy_load_modules()
     
@@ -434,6 +436,9 @@ async def handle_tts(m):
         if voice_type == "funny":
             # Kulgili ovoz - using female voice then pitch shift
             voice = "uz-UZ-MadinaNeural"
+        elif voice_type == "venom":
+            # Venom ovoz - using male voice deep effect
+            voice = "uz-UZ-SardorNeural"
         else:
             voice = "uz-UZ-SardorNeural" if voice_type == "male" else "uz-UZ-MadinaNeural"
 
@@ -456,12 +461,42 @@ async def handle_tts(m):
             )
             return
 
-        # If funny voice, apply pitch shift using ffmpeg
-        if voice_type == "funny":
+        # VENOM VOICE: Apply scary deep effect
+        if voice_type == "venom":
+            await bot.edit_message_text("🎭 Venom ovoz effekti qo'llanilmoqda...", cid, msg.message_id)
+            
+            # Venom effect: asetrate lowers pitch, atempo speeds up, vibrato adds scary modulation
+            cmd_venom = [
+                "ffmpeg", "-y",
+                "-i", input_path,
+                "-af", "asetrate=44100*0.6,atempo=1.5,vibrato=f=10:d=0.5",
+                "-ar", "44100",
+                "-ac", "1",
+                output_path
+            ]
+            
+            try:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: subprocess.run(cmd_venom, capture_output=True, text=True, timeout=30)
+                )
+                
+                if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    file_to_send = output_path
+                    logger.info(f"Venom voice applied for user {cid}")
+                else:
+                    logger.warning(f"Venom effect failed, using original voice")
+                    file_to_send = input_path
+            except Exception as e:
+                logger.error(f"Venom voice processing error: {e}")
+                file_to_send = input_path
+        
+        # FUNNY VOICE: Apply pitch shift using ffmpeg
+        elif voice_type == "funny":
             await bot.edit_message_text("🤡 Kulgili ovoz effekti qo'llanilmoqda...", cid, msg.message_id)
 
             # Try rubberband first (best quality pitch shift without speed change)
-            # rubberband=pitch=1.5 raises pitch by 1.5x, keeps original speed
             cmd_rubberband = [
                 "ffmpeg", "-y",
                 "-i", input_path,
@@ -471,9 +506,7 @@ async def handle_tts(m):
                 output_path
             ]
 
-            # Fallback: asetrate+atempo method (pitch up 1.4x, tempo compensated)
-            # asetrate increases sample rate (pitch & speed up)
-            # atempo slows down to compensate (1/1.4 = 0.714)
+            # Fallback: asetrate+atempo method
             cmd_asetrate = [
                 "ffmpeg", "-y",
                 "-i", input_path,
@@ -488,7 +521,7 @@ async def handle_tts(m):
             try:
                 loop = asyncio.get_event_loop()
 
-                # First try rubberband (better quality)
+                # First try rubberband
                 result = await loop.run_in_executor(
                     None,
                     lambda: subprocess.run(cmd_rubberband, capture_output=True, text=True, timeout=30)
@@ -875,7 +908,7 @@ async def cache_audio(url, file_path):
         _audio_cache[url] = (file_path, time.time())
         logger.info(f"Audio cached: {url[:50]}...")
 
-async def search_music_ultrafast(query, limit=8):
+async def search_music_ultrafast(query, limit=10):
     """EXTREME SPEED music search - YouTube direct, no Spotify"""
     # LAZY LOAD: Load yt_dlp only when needed
     ydl_module, _ = lazy_load_modules()
@@ -966,6 +999,9 @@ async def search_music_ultrafast(query, limit=8):
         logger.error(f"Music search error: {e}")
         return None
 
+# Alias for YouTube search (used by handle_music_search)
+search_music_youtube = search_music_ultrafast
+
 # Legacy function for compatibility - now routes to YouTube only
 async def search_youtube_music(query, limit=8):
     """Legacy: Now uses ultrafast search"""
@@ -976,7 +1012,7 @@ async def search_spotify_top10(query):
     return await search_music_ultrafast(query, limit=8)
 
 async def handle_music_search(m):
-    """PROFESSIONAL: Music search with Spotify-style UI"""
+    """YOUTUBE ONLY: Music search with 10 results and inline keyboard"""
     cid = m.chat.id
     query = m.text.strip()
     search_msg = None
@@ -985,40 +1021,30 @@ async def handle_music_search(m):
         user_state[cid] = None  # Clear state immediately
 
         # Send searching message
-        search_msg = await bot.send_message(cid, "🔍 Qidirilmoqda...")
+        search_msg = await bot.send_message(cid, "🔍 YouTube'dan qidirilmoqda...")
 
-        # PROFESSIONAL: Try Spotify first, fallback to YouTube
-        tracks = None
-        try:
-            if spotify_client:
-                tracks = await search_spotify(query, limit=10)
-        except Exception as e:
-            logger.warning(f"Spotify search failed: {e}")
-        
-        # Fallback to YouTube if Spotify failed or no results
-        if not tracks:
-            tracks = await search_music_ultrafast(query, limit=10)
+        # YOUTUBE ONLY: Search using yt-dlp
+        tracks = await search_music_youtube(query, limit=10)
 
-        # PROFESSIONAL FIX: Empty results - NO KEYBOARD, just message
+        # Empty results - NO KEYBOARD, just message
         if not tracks or len(tracks) == 0:
             await bot.edit_message_text(
                 "❌ Topilmadi",
                 cid, search_msg.message_id
-                # NO reply_markup to avoid 400 error
             )
             return
 
-        # Build professional numbered list (1-10)
+        # Build numbered list (1-10)
         result_text = f"🎵 *Topilgan natijalar:* `{query}`\n\n"
         result_text += "*Quyidagi qo'shiqlardan birini tanlang:*\n\n"
 
         for i, track in enumerate(tracks[:10], 1):  # Max 10 results
-            artist = track.get('artist', 'Unknown')
-            name = track.get('name', 'Unknown')
+            artist = str(track.get('artist', 'Unknown'))
+            name = str(track.get('name', 'Unknown'))
             duration = format_duration(track.get('duration', 0))
-            result_text += f"{i}. {artist} - {name} `[{duration}]`\n"
+            result_text += f"{i}. {artist} - {name} ({duration})\n"
 
-        # PROFESSIONAL: 2-row keyboard (1-5, 6-10) with Spotify-style callbacks
+        # Inline keyboard: buttons 1-10 (all in one row or split)
         keyboard_rows = []
         track_count = min(len(tracks), 10)
         
@@ -1026,25 +1052,20 @@ async def handle_music_search(m):
         if track_count >= 1:
             row1 = []
             for i in range(1, min(6, track_count + 1)):
-                track = tracks[i-1]
-                # Use Spotify URL if available, otherwise YouTube URL
-                url = track.get('spotify_url') or track.get('url', '')
-                row1.append(types.InlineKeyboardButton(str(i), callback_data=f"sp_dl:{url}"))
+                row1.append(types.InlineKeyboardButton(str(i), callback_data=f"yt_dl:{i}"))
             keyboard_rows.append(row1)
         
         # Row 2: buttons 6-10 (if available)
         if track_count >= 6:
             row2 = []
             for i in range(6, track_count + 1):
-                track = tracks[i-1]
-                url = track.get('spotify_url') or track.get('url', '')
-                row2.append(types.InlineKeyboardButton(str(i), callback_data=f"sp_dl:{url}"))
+                row2.append(types.InlineKeyboardButton(str(i), callback_data=f"yt_dl:{i}"))
             keyboard_rows.append(row2)
 
         markup = types.InlineKeyboardMarkup(keyboard_rows)
 
-        # Store track data
-        user_state[cid + '_tracks'] = {i+1: t for i, t in enumerate(tracks[:10])}
+        # Store track data by index
+        user_state[cid + '_tracks'] = {str(i+1): t for i, t in enumerate(tracks[:10])}
 
         await bot.edit_message_text(
             result_text,
@@ -1067,9 +1088,9 @@ async def handle_music_search(m):
         except Exception:
             pass
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("sp_dl:"))
-async def spotify_download_handler(call):
-    """PROFESSIONAL: Handle Spotify-style download callback"""
+@bot.callback_query_handler(func=lambda c: c.data.startswith("yt_dl:"))
+async def youtube_download_handler(call):
+    """YOUTUBE: Handle download from YouTube search results"""
     cid = call.message.chat.id
     data = call.data
     msg_id = call.message.message_id
@@ -1077,59 +1098,57 @@ async def spotify_download_handler(call):
     try:
         await bot.answer_callback_query(call.id)
 
-        url = data[6:]  # Remove "sp_dl:" prefix
-
-        # Get track info from stored data by index
+        # Get index from callback data (yt_dl:1, yt_dl:2, etc.)
+        index = data[6:]  # Remove "yt_dl:" prefix
+        
+        # Get track from stored data
         tracks_dict = user_state.get(cid + '_tracks', {})
-        
-        # Try to find track by URL or use default
-        track = None
-        for t in tracks_dict.values():
-            if t.get('url') == url or t.get('spotify_url') == url:
-                track = t
-                break
-        
+        track = tracks_dict.get(index)
+
         if not track:
-            # Create minimal track info from URL
-            track = {
-                'id': 'unknown',
-                'name': 'Track',
-                'artist': 'Unknown',
-                'duration': 0,
-                'url': url
-            }
+            await bot.edit_message_text(
+                "❌ Qo'shiq ma'lumotlari topilmadi. Qayta urinib ko'ring.",
+                cid, msg_id,
+                reply_markup=main_menu()
+            )
+            return
 
         # Update message to show loading
         try:
             await bot.edit_message_text(
-                f"🎵 {track.get('artist', 'Unknown')} - {track.get('name', 'Track')}\n\n⏳ Yuklanmoqda...",
+                f"🎵 {track.get('artist', 'Unknown')} - {track.get('name', 'Unknown')}\n\n⏳ Yuklanmoqda...",
                 cid, msg_id
             )
         except Exception:
             pass
 
-        # STABILITY: Wrap download in try-except
-        try:
-            await download_track_ultrafast(cid, track, url, msg_id)
-        except Exception as download_error:
-            logger.error(f"Download failed: {download_error}")
+        # Download audio only from YouTube
+        url = track.get('url', '')
+        if not url:
             await bot.edit_message_text(
-                f"❌ Yuklab olishda xatolik: {str(download_error)[:100]}",
+                "❌ Video URL topilmadi",
                 cid, msg_id,
                 reply_markup=main_menu()
             )
+            return
+            
+        # Download audio only
+        await download_youtube_audio(cid, track, url, msg_id)
 
     except Exception as e:
-        logger.error(f"Spotify callback error: {e}")
+        logger.error(f"YouTube download error: {e}")
         try:
-            await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
+            await bot.edit_message_text(
+                f"❌ Xatolik: {str(e)[:100]}",
+                cid, msg_id,
+                reply_markup=main_menu()
+            )
         except Exception:
             pass
 
-# Keep old handler for backward compatibility
 @bot.callback_query_handler(func=lambda c: c.data.startswith("dl:"))
 async def download_url_handler(call):
-    """EXTREME SPEED: Handle download from YouTube URL"""
+    """Handle download from YouTube URL (legacy)"""
     cid = call.message.chat.id
     data = call.data
     msg_id = call.message.message_id
@@ -1162,7 +1181,7 @@ async def download_url_handler(call):
 
         # STABILITY: Wrap download in try-except
         try:
-            await download_track_ultrafast(cid, track, url, msg_id)
+            await download_youtube_audio(cid, track, url, msg_id)
         except Exception as download_error:
             logger.error(f"Download failed: {download_error}")
             await bot.edit_message_text(
@@ -1456,6 +1475,109 @@ async def download_from_spotify_url(cid, track, spotify_url, msg_id):
             )
             safe_remove(file_path)
 
+async def download_youtube_audio(cid, track, url, msg_id):
+    """YouTube'dan faqat audio (MP3) formatida yuklash"""
+    # LAZY LOAD: Load yt_dlp only when needed
+    ydl_module, _ = lazy_load_modules()
+    
+    file_path = None
+    
+    try:
+        # Update status
+        await bot.edit_message_text(
+            f"🎵 {track.get('artist', 'Unknown')} - {track.get('name', 'Unknown')}\n\n⏳ Yuklanmoqda...",
+            cid, msg_id
+        )
+        
+        # FAST: Use optimal format for audio only
+        ydl_opts = {
+            'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
+            'outtmpl': os.path.join(TEMP_DIR, f'{cid}_%(title)s.%(ext)s'),
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'quiet': True,
+            'no_warnings': True,
+            'max_filesize': 50 * 1024 * 1024,  # 50MB limit
+        }
+        
+        # Download audio
+        info = None
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = await run_in_thread(ydl.extract_info, url, download=True)
+        except Exception as e:
+            logger.warning(f"Audio download failed: {e}")
+            await bot.edit_message_text(
+                f"❌ Yuklab olishda xatolik: {str(e)[:100]}",
+                cid, msg_id,
+                reply_markup=main_menu()
+            )
+            return
+        
+        if not info:
+            await bot.edit_message_text(
+                "❌ Video ma'lumotlari olinmadi",
+                cid, msg_id,
+                reply_markup=main_menu()
+            )
+            return
+        
+        # Find downloaded MP3 file
+        downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.mp3"))
+        if not downloaded_files:
+            downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.*"))
+        
+        if not downloaded_files:
+            await bot.edit_message_text(
+                "❌ Fayl topilmadi",
+                cid, msg_id,
+                reply_markup=main_menu()
+            )
+            return
+        
+        file_path = str(downloaded_files[0])
+        
+        # Check file size
+        if os.path.getsize(file_path) > 50 * 1024 * 1024:
+            await bot.edit_message_text(
+                "❌ Fayl hajmi juda katta (>50MB)",
+                cid, msg_id,
+                reply_markup=main_menu()
+            )
+            return
+        
+        # Send audio
+        await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
+        
+        with open(file_path, "rb") as f:
+            await bot.send_audio(
+                cid,
+                f,
+                title=track.get('name', info.get('title', 'Track')),
+                performer=track.get('artist', info.get('uploader', 'Unknown')),
+                duration=track.get('duration', info.get('duration', 0)),
+                caption=f"🟢 {track.get('artist', 'Unknown')} - {track.get('name', 'Track')}\n✅ @foyda1ii_bot",
+                reply_markup=main_menu()
+            )
+        
+        await bot.delete_message(cid, msg_id)
+        
+        # Cleanup
+        safe_remove(file_path)
+        
+    except Exception as e:
+        logger.error(f"YouTube audio download error: {e}")
+        await bot.edit_message_text(
+            f"❌ Xatolik: {str(e)[:100]}",
+            cid, msg_id,
+            reply_markup=main_menu()
+        )
+        if file_path:
+            safe_remove(file_path)
+
 # ================= VIDEO QUEUE WORKER =================
 async def video_queue_worker():
     """Process circle videos from queue sequentially but fast"""
@@ -1631,33 +1753,25 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             await bot.edit_message_text("❌ FFmpeg o'rnatilmagan.", cid, msg_id)
             return
 
-        # MAX SPEED SETTINGS
-        CIRCLE_SIZE = 320
-        FPS = 20  # Reduced from 24 for speed
-
+        # YASHIN TEZLIGI: Render server uchun maksimal tezlik
         await bot.edit_message_text("⚡ Video ishlanmoqda...", cid, msg_id)
 
-        # SKIP ffprobe - use ffmpeg expression syntax (faster!)
-        # Direct processing without probing dimensions
-        crop_filter = f"crop=min(iw\\,ih):min(iw\\,ih):(iw-min(iw\\,ih))/2:(ih-min(iw\\,ih))/2,fps={FPS},scale={CIRCLE_SIZE}:{CIRCLE_SIZE}:flags=lanczos"
-
-        # TURBO SPEED FFmpeg with zerolatency tuning
+        # EXACT ffmpeg parameters requested by user
         cmd = [
             "ffmpeg", "-y",
             "-hide_banner",
             "-loglevel", "error",
             "-i", input_path,
-            # Fast filter: crop + fps + scale
-            "-vf", crop_filter,
+            # Video codec and speed settings
             "-c:v", "libx264",
-            "-preset", "ultrafast",    # FASTEST preset
-            "-tune", "zerolatency",   # TURBO: Low latency tuning
-            "-crf", "28",             # Balanced quality
-            "-pix_fmt", "yuv420p",
-            "-threads", "0",          # All CPU cores
-            # Copy audio if possible (much faster than re-encode)
+            "-preset", "ultrafast",    # Eng tez preset
+            "-tune", "zerolatency",   # Minimal kechikish
+            "-threads", "0",          # Barcha CPU yadrolaridan foydalanish
+            "-crf", "28",             # Sifat va tezlik balansi
+            "-s", "320x320",          # Aniq o'lcham (user talabi)
+            # Audio copy (tezroq)
             "-c:a", "copy",
-            "-t", "60",               # Max 60 sec
+            "-t", "60",               # Maksimum 60 soniya
             "-movflags", "+faststart",
             output_path
         ]
@@ -1672,13 +1786,12 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
                 "-hide_banner",
                 "-loglevel", "error",
                 "-i", input_path,
-                "-vf", crop_filter,
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
-                "-tune", "zerolatency",   # TURBO: Low latency tuning
-                "-crf", "28",
-                "-pix_fmt", "yuv420p",
+                "-tune", "zerolatency",
                 "-threads", "0",
+                "-crf", "28",
+                "-s", "320x320",
                 "-c:a", "aac",
                 "-b:a", "96k",
                 "-t", "60",
