@@ -185,6 +185,22 @@ except Exception as e:
     logger.error(f"❌ Port binding error: {e}")
 # =================================================================
 
+# Flask web server function for main() to call
+def run_web_server():
+    """Run Flask web server for Render health check"""
+    try:
+        from flask import Flask
+        app = Flask(__name__)
+        
+        @app.route('/')
+        def home():
+            return "Bot is running!"
+        
+        port = int(os.environ.get('PORT', 8080))
+        app.run(host='0.0.0.0', port=port, threaded=True)
+    except Exception as e:
+        logger.error(f"Flask server error: {e}")
+
 # ================= FORCE JOIN MIDDLEWARE =================
 async def check_subscription(user_id):
     """Check if user is subscribed to channel"""
@@ -286,7 +302,8 @@ def admin_menu():
 # ================= START =================
 @bot.message_handler(commands=['start'])
 async def start(m):
-    """Start command - with real-time subscription check"""
+    """Start command handler"""
+    logger.info(f"📩 [START] User: {m.chat.id}, Username: {m.from_user.username if m.from_user else 'N/A'}")
     cid = m.chat.id
     user_id = m.from_user.id
 
@@ -329,9 +346,10 @@ AUTO_POST_TEXT = None
 # ================= TEXT HANDLER =================
 @bot.message_handler(content_types=['text'])
 async def text_handler(m):
-    """Main text handler with global subscription check"""
+    """Main text message handler with voice menu support"""
     cid = m.chat.id
     txt = m.text
+    logger.info(f"📩 [TEXT] User: {cid}, Text: {txt[:50]}...")
     user_id = m.from_user.id
     state = user_state.get(cid)
 
@@ -1548,6 +1566,15 @@ async def main():
         logger.info(f"🔧 Python version: check with python --version")
         logger.info("=" * 50)
         
+        # Start Flask in separate thread FIRST (before polling)
+        try:
+            import threading
+            flask_thread = threading.Thread(target=run_web_server, daemon=True)
+            flask_thread.start()
+            logger.info("✅ Flask web server started in separate thread (port 8080)")
+        except Exception as e:
+            logger.error(f"❌ Flask startup failed: {e}")
+        
         # Test temp directory writable
         try:
             test_file = os.path.join(TEMP_DIR, "startup_test.tmp")
@@ -1558,10 +1585,10 @@ async def main():
         except Exception as e:
             logger.error(f"❌ Temp directory error: {e}")
         
-        # Remove webhook to prevent 409 Conflict errors on Render
+        # CRITICAL: Remove webhook with drop_pending_updates to force fresh message polling
         try:
-            await bot.remove_webhook()
-            logger.info("✅ Webhook removed")
+            await bot.remove_webhook(drop_pending_updates=True)
+            logger.info("✅ Webhook removed, pending updates dropped")
         except Exception as e:
             logger.warning(f"⚠️ Webhook removal: {e}")
 
