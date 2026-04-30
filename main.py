@@ -32,10 +32,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is required!")
 
-# Optional: Spotify (not required for core functionality)
-SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-spotify_client = None
+# YouTube only - No Spotify
+music_cache = {}  # Simple memory cache for music
 
 def lazy_load_modules():
     """Lazy load heavy modules on first use"""
@@ -48,7 +46,27 @@ def lazy_load_modules():
         edge_tts = et
     return yt_dlp, edge_tts
 
-# No Spotify - YouTube only for music
+# Music cache helpers
+def get_cache_key(query):
+    return query.lower().strip()
+
+def get_cached_audio(query):
+    key = get_cache_key(query)
+    if key in music_cache:
+        cache_time, file_path = music_cache[key]
+        if time.time() - cache_time < 3600 and os.path.exists(file_path):  # 1 hour cache
+            return file_path
+        else:
+            del music_cache[key]
+    return None
+
+def cache_audio(query, file_path):
+    key = get_cache_key(query)
+    music_cache[key] = (time.time(), file_path)
+    # Keep cache size manageable
+    if len(music_cache) > 50:
+        oldest = min(music_cache, key=lambda k: music_cache[k][0])
+        del music_cache[oldest]
 
 # Async helper for CPU-bound tasks
 async def run_in_thread(func, *args, **kwargs):
@@ -452,15 +470,20 @@ async def handle_tts(m):
             )
             return
 
-        # VENOM VOICE: Apply scary deep effect
+        # VENOM VOICE: Professional dark and scary effect
         if voice_type == "venom":
             await bot.edit_message_text("🎭 Venom ovoz effekti qo'llanilmoqda...", cid, msg.message_id)
             
-            # REAL Venom effect: MAXIMUM SCARY - deep pitch, heavy echo, boosted bass
+            # PRO Venom effect: Darker, deeper, slightly slower, scary but clear
+            # asetrate=0.8 = 20% deeper pitch (not too extreme)
+            # atempo=0.88 = 12% slower (menacing but understandable)
+            # bass=g=8 = moderate bass boost
+            # aecho = subtle echo for depth
+            # lowpass = slight muffling for dark character
             cmd_venom = [
                 "ffmpeg", "-y",
                 "-i", input_path,
-                "-af", "bass=g=12,asetrate=44100*0.5,atempo=2.0,aecho=0.8:0.88:60:0.4",
+                "-af", "asetrate=44100*0.8,atempo=0.88,bass=g=8,aecho=0.6:0.7:35:0.3,lowpass=f=3200,highpass=f=80",
                 "-ar", "44100",
                 "-ac", "1",
                 output_path
@@ -805,12 +828,12 @@ async def download_music_async(cid, query, search_msg):
 
 
 def format_duration(seconds):
-    """Format seconds to mm:ss"""
+    """Format duration in seconds to MM:SS"""
     if not seconds:
-        return "00:00"
+        return "0:00"
     minutes = seconds // 60
     secs = seconds % 60
-    return f"{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
 
 # ================= EXTREME SPEED MUSIC SEARCH (YouTube Only) =================
 # Search cache (5 minutes)
@@ -942,15 +965,6 @@ async def search_music_ultrafast(query, limit=10):
 
 # Alias for YouTube search (used by handle_music_search)
 search_music_youtube = search_music_ultrafast
-
-# Legacy function for compatibility - now routes to YouTube only
-async def search_youtube_music(query, limit=8):
-    """Legacy: Now uses ultrafast search"""
-    return await search_music_ultrafast(query, limit)
-
-async def search_spotify_top10(query):
-    """DEPRECATED: Use YouTube for extreme speed"""
-    return await search_music_ultrafast(query, limit=8)
 
 async def handle_music_search(m):
     """YOUTUBE ONLY: Music search with 10 results and inline keyboard"""
@@ -1159,105 +1173,88 @@ async def music_navigation_handler(call):
         logger.error(f"Navigation error: {e}")
 
 async def download_youtube_audio(cid, track, url, msg_id):
-    """YouTube'dan faqat audio (MP3) formatida yuklash"""
-    # LAZY LOAD: Load yt_dlp only when needed
+    """FAST YouTube audio download with caching"""
     ydl_module, _ = lazy_load_modules()
-    
     file_path = None
     
     try:
-        # Update status
-        await bot.edit_message_text(
-            f"🎵 {track.get('artist', 'Unknown')} - {track.get('name', 'Unknown')}\n\n⏳ Yuklanmoqda...",
-            cid, msg_id
-        )
+        # Check cache first
+        cache_key = f"{track.get('name', '')}_{track.get('artist', '')}"
+        cached_file = get_cached_audio(cache_key)
+        if cached_file and os.path.exists(cached_file):
+            await bot.edit_message_text("⚡ Keshdan yuborilmoqda...", cid, msg_id)
+            with open(cached_file, "rb") as f:
+                await bot.send_audio(
+                    cid, f,
+                    title=track.get('name', 'Music'),
+                    performer=track.get('artist', 'Unknown'),
+                    duration=track.get('duration', 0),
+                    caption=f"🎵 {track.get('artist', 'Unknown')} - {track.get('name', 'Track')}\n⚡ Keshdan\n✅ @foyda1ii_bot",
+                    reply_markup=main_menu()
+                )
+            await bot.delete_message(cid, msg_id)
+            return
+
+        await bot.edit_message_text(f"🎵 {track.get('artist', 'Unknown')} - {track.get('name', 'Unknown')}\n\n⏳ Yuklanmoqda...", cid, msg_id)
         
-        # FAST: Use optimal format for audio only
+        # Fast download options
         ydl_opts = {
-            'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
+            'format': 'bestaudio/best',
             'outtmpl': os.path.join(TEMP_DIR, f'{cid}_%(title)s.%(ext)s'),
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
+            'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
             'quiet': True,
             'no_warnings': True,
-            'max_filesize': 50 * 1024 * 1024,  # 50MB limit
+            'max_filesize': 50 * 1024 * 1024,
         }
         
-        # Download audio
         info = None
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await run_in_thread(ydl.extract_info, url, download=True)
         except Exception as e:
-            logger.warning(f"Audio download failed: {e}")
-            await bot.edit_message_text(
-                f"❌ Yuklab olishda xatolik: {str(e)[:100]}",
-                cid, msg_id,
-                reply_markup=main_menu()
-            )
+            logger.warning(f"Download failed: {e}")
+            await bot.edit_message_text(f"❌ Yuklab olishda xatolik", cid, msg_id, reply_markup=main_menu())
             return
         
         if not info:
-            await bot.edit_message_text(
-                "❌ Video ma'lumotlari olinmadi",
-                cid, msg_id,
-                reply_markup=main_menu()
-            )
+            await bot.edit_message_text("❌ Ma'lumot olinmadi", cid, msg_id, reply_markup=main_menu())
             return
         
-        # Find downloaded MP3 file
+        # Find MP3 file
         downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.mp3"))
         if not downloaded_files:
             downloaded_files = list(Path(TEMP_DIR).glob(f"{cid}_*.*"))
         
         if not downloaded_files:
-            await bot.edit_message_text(
-                "❌ Fayl topilmadi",
-                cid, msg_id,
-                reply_markup=main_menu()
-            )
+            await bot.edit_message_text("❌ Fayl topilmadi", cid, msg_id, reply_markup=main_menu())
             return
         
         file_path = str(downloaded_files[0])
         
-        # Check file size
         if os.path.getsize(file_path) > 50 * 1024 * 1024:
-            await bot.edit_message_text(
-                "❌ Fayl hajmi juda katta (>50MB)",
-                cid, msg_id,
-                reply_markup=main_menu()
-            )
+            await bot.edit_message_text("❌ Fayl juda katta", cid, msg_id, reply_markup=main_menu())
             return
         
-        # Send audio
-        await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
+        # Cache the file
+        cache_audio(cache_key, file_path)
         
+        await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
         with open(file_path, "rb") as f:
             await bot.send_audio(
-                cid,
-                f,
-                title=track.get('name', info.get('title', 'Track')),
+                cid, f,
+                title=track.get('name', info.get('title', 'Music')),
                 performer=track.get('artist', info.get('uploader', 'Unknown')),
                 duration=track.get('duration', info.get('duration', 0)),
-                caption=f"🟢 {track.get('artist', 'Unknown')} - {track.get('name', 'Track')}\n✅ @foyda1ii_bot",
+                caption=f"🎵 {track.get('artist', 'Unknown')} - {track.get('name', 'Track')}\n✅ @foyda1ii_bot",
                 reply_markup=main_menu()
             )
         
         await bot.delete_message(cid, msg_id)
-        
-        # Cleanup
         safe_remove(file_path)
         
     except Exception as e:
-        logger.error(f"YouTube audio download error: {e}")
-        await bot.edit_message_text(
-            f"❌ Xatolik: {str(e)[:100]}",
-            cid, msg_id,
-            reply_markup=main_menu()
-        )
+        logger.error(f"Download error: {e}")
+        await bot.edit_message_text(f"❌ Xatolik", cid, msg_id, reply_markup=main_menu())
         if file_path:
             safe_remove(file_path)
 
