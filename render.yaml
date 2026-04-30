@@ -15,10 +15,6 @@ services:
         value: 3.11.0
       - key: BOT_TOKEN
         sync: false  # Set in Render dashboard
-      - key: SPOTIFY_CLIENT_ID
-        sync: false  # Optional
-      - key: SPOTIFY_CLIENT_SECRET
-        sync: false  # Optional
       - key: RENDER
         value: "true"
     healthCheckPath: /

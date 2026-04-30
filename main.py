@@ -28,9 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================= CONFIG =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable is required!")
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # Will be validated in main() to allow safe startup wrapper
 
 # YouTube only - No Spotify
 music_cache = {}  # Simple memory cache for music
@@ -765,7 +763,7 @@ async def download_music_async(cid, query, search_msg):
                 )
                 return
 
-            # Use Spotify metadata if available, otherwise from source
+            # Extract metadata from source
             if not title:
                 title = info.get('title', 'Unknown').split(' - ')[-1] if ' - ' in info.get('title', '') else info.get('title', 'Unknown')
                 artist = info.get('uploader', info.get('channel', 'Unknown'))
@@ -794,7 +792,7 @@ async def download_music_async(cid, query, search_msg):
             # Source emoji
             source_emoji = {"youtube": "▶️", "soundcloud": "☁️"}.get(source.lower(), "🎵")
 
-            # Send audio with Spotify-accurate metadata
+            # Send audio with metadata
             with open(file_path, "rb") as f:
                 await bot.send_audio(
                     cid,
@@ -1529,14 +1527,21 @@ async def auto_post_loop():
                     except Exception as e:
                         logger.error(f"Auto post error for {u}: {e}")
         except Exception as e:
-            logger.error(f"Auto post loop error: {e}")
         await asyncio.sleep(3600)
 
 # ================= RUN (ASYNC) =================
 async def main():
-    """Main async function - RENDER OPTIMIZED with startup error handling"""
+    """Main async function to start the bot"""
     try:
-        logger.info("=" * 50)
+        # Validate BOT_TOKEN here instead of at module level for better error visibility
+        if not BOT_TOKEN:
+            print("💥 FATAL ERROR: BOT_TOKEN environment variable is required!")
+            print("💥 Please set BOT_TOKEN in Render dashboard environment variables")
+            raise ValueError("BOT_TOKEN environment variable is required!")
+        
+        # Initialize bot with async mode
+        from telebot.async_telebot import AsyncTeleBot
+        bot = AsyncTeleBot(BOT_TOKEN)
         logger.info("🚀 Starting bot on Render...")
         logger.info(f"🤖 Bot token: {BOT_TOKEN[:10]}...")
         logger.info(f"📁 Temp dir: {TEMP_DIR}")
@@ -1600,15 +1605,24 @@ async def main():
         raise
 
 if __name__ == "__main__":
+    # IMMEDIATE PRINT for Render visibility - before any imports might fail
+    print("=" * 60)
+    print("🔥 BOT STARTING - Safe Startup Wrapper")
+    print("=" * 60)
+    
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("👋 Bot stopped by user")
-    except Exception as e:
-        logger.critical(f"💥 UNHANDLED FATAL ERROR: {e}")
-        logger.critical(f"💥 Type: {type(e).__name__}")
         import traceback
-        logger.critical(f"💥 Full traceback:\n{traceback.format_exc()}")
+        asyncio.run(main())
+        print("✅ Bot finished normally")
+    except KeyboardInterrupt:
+        print("👋 Bot stopped by user")
+    except Exception as e:
+        print("=" * 60)
+        print(f"💥 UNHANDLED FATAL ERROR: {e}")
+        print(f"💥 Error type: {type(e).__name__}")
+        print(f"💥 Full traceback:")
+        print(traceback.format_exc())
+        print("=" * 60)
         # Exit with error code so Render knows it failed
         import sys
         sys.exit(1)
