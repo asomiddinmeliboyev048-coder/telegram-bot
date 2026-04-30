@@ -164,21 +164,30 @@ def safe_remove(filepath):
     except Exception:
         pass
 
-# ================= FLASK (RENDER FIX) =================
-app = Flask(__name__)
+# ================= OPTIONAL WEB SERVER (Render Health Check) =================
+# Flask is optional - bot works without it
+try:
+    from flask import Flask
+    app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return "Bot is running"
+    @app.route('/')
+    def home():
+        return "Bot is running"
 
-def run_web():
+    def run_web():
+        port = int(os.environ.get("PORT", 10000))
+        app.run(host="0.0.0.0", port=port, threaded=True)
+
+    # Start web server in background thread
     import threading
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
-
-import threading
-threading.Thread(target=run_web, daemon=True).start()
-# =====================================================
+    threading.Thread(target=run_web, daemon=True).start()
+    logger.info("✅ Web server started for health checks")
+except ImportError:
+    logger.warning("⚠️ Flask not installed - health check endpoint disabled")
+    logger.info("✅ Bot will still work normally without Flask")
+except Exception as e:
+    logger.error(f"❌ Web server error: {e}")
+# =================================================================
 
 # ================= FORCE JOIN MIDDLEWARE =================
 async def check_subscription(user_id):
@@ -1690,42 +1699,85 @@ async def auto_post_loop():
 
 # ================= RUN (ASYNC) =================
 async def main():
-    """Main async function - RENDER OPTIMIZED"""
-    logger.info("🚀 Starting Render-optimized bot...")
-
-    # Remove webhook to prevent 409 Conflict errors on Render
+    """Main async function - RENDER OPTIMIZED with startup error handling"""
     try:
-        await bot.remove_webhook()
-        logger.info("✅ Webhook removed")
-    except Exception as e:
-        logger.warning(f"Webhook removal: {e}")
-
-    # Start background tasks
-    asyncio.create_task(auto_post_loop())
-    asyncio.create_task(video_queue_worker())
-    asyncio.create_task(periodic_temp_cleanup())  # NEW: Periodic cleanup
-    
-    logger.info("✅ Background tasks started")
-    logger.info(f"✅ Temp directory: {TEMP_DIR}")
-    logger.info(f"✅ Semaphores: video={video_semaphore._value}, music={music_semaphore._value}, circle={circle_semaphore._value}")
-
-    # Start bot polling with optimized settings for Render
-    while True:
+        logger.info("=" * 50)
+        logger.info("🚀 Starting bot on Render...")
+        logger.info(f"🤖 Bot token: {BOT_TOKEN[:10]}...")
+        logger.info(f"📁 Temp dir: {TEMP_DIR}")
+        logger.info(f"🔧 Python version: check with python --version")
+        logger.info("=" * 50)
+        
+        # Test temp directory writable
         try:
-            logger.info("🔥 BOT IS RUNNING")
-            await bot.infinity_polling(
-                skip_pending=True,
-                timeout=30,  # Faster timeout for Render
-                long_polling_timeout=10  # Reduce connection duration
-            )
+            test_file = os.path.join(TEMP_DIR, "startup_test.tmp")
+            with open(test_file, "w") as f:
+                f.write("test")
+            os.remove(test_file)
+            logger.info("✅ Temp directory is writable")
         except Exception as e:
-            logger.error(f"Polling error: {e}")
-            await asyncio.sleep(5)
+            logger.error(f"❌ Temp directory error: {e}")
+        
+        # Remove webhook to prevent 409 Conflict errors on Render
+        try:
+            await bot.remove_webhook()
+            logger.info("✅ Webhook removed")
+        except Exception as e:
+            logger.warning(f"⚠️ Webhook removal: {e}")
+
+        # Start background tasks with error handling
+        try:
+            asyncio.create_task(auto_post_loop())
+            logger.info("✅ Auto-post task started")
+        except Exception as e:
+            logger.error(f"❌ Auto-post failed: {e}")
+            
+        try:
+            asyncio.create_task(video_queue_worker())
+            logger.info("✅ Video queue worker started")
+        except Exception as e:
+            logger.error(f"❌ Video queue failed: {e}")
+            
+        try:
+            asyncio.create_task(periodic_temp_cleanup())
+            logger.info("✅ Cleanup task started")
+        except Exception as e:
+            logger.error(f"❌ Cleanup task failed: {e}")
+        
+        logger.info(f"✅ Semaphores: video={video_semaphore._value}, music={music_semaphore._value}, circle={circle_semaphore._value}")
+        logger.info("=" * 50)
+
+        # Start bot polling with optimized settings for Render
+        while True:
+            try:
+                logger.info("🔥 BOT IS RUNNING - Waiting for messages...")
+                await bot.infinity_polling(
+                    skip_pending=True,
+                    timeout=30,
+                    long_polling_timeout=10
+                )
+            except Exception as e:
+                logger.error(f"❌ Polling error: {e}")
+                logger.info("🔄 Restarting polling in 5 seconds...")
+                await asyncio.sleep(5)
+                
+    except Exception as e:
+        logger.critical(f"💥 FATAL STARTUP ERROR: {e}")
+        logger.critical(f"💥 Error type: {type(e).__name__}")
+        import traceback
+        logger.critical(f"💥 Traceback:\n{traceback.format_exc()}")
+        raise
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("👋 Bot stopped by user")
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.critical(f"💥 UNHANDLED FATAL ERROR: {e}")
+        logger.critical(f"💥 Type: {type(e).__name__}")
+        import traceback
+        logger.critical(f"💥 Full traceback:\n{traceback.format_exc()}")
+        # Exit with error code so Render knows it failed
+        import sys
+        sys.exit(1)
