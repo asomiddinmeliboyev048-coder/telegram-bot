@@ -165,26 +165,27 @@ def safe_remove(filepath):
         pass
 
 # ================= RENDER PORT BINDING (REQUIRED) =================
-# Bot must bind to a port to stay alive on Render
-try:
-    import os
-    from flask import Flask
-    from threading import Thread
+# Flask health check - runs before bot polling to prevent Render timeout
+import os
+from threading import Thread
 
+try:
+    from flask import Flask
     app = Flask('')
+
     @app.route('/')
     def home():
-        return "Bot is alive!"
+        return "Bot is running!"
 
     def run():
         port = int(os.environ.get('PORT', 8080))
         app.run(host='0.0.0.0', port=port)
 
     Thread(target=run, daemon=True).start()
-    logger.info("✅ Port binding active (Render requirement)")
+    logger.info("✅ Flask health check active on port %s", os.environ.get('PORT', 8080))
 except ImportError:
-    logger.warning("⚠️ Flask not installed - port binding disabled")
-    logger.info("⚠️ Bot may restart on Render without port binding!")
+    logger.warning("⚠️ Flask not installed - health check disabled")
+    logger.info("⚠️ Bot may restart on Render without health check!")
 except Exception as e:
     logger.error(f"❌ Port binding error: {e}")
 # =================================================================
@@ -446,6 +447,14 @@ async def handle_tts(m):
         msg = await bot.send_message(cid, "🎙️ Ovoz yaratilmoqda...")
         communicate = edge_tts.Communicate(text=txt, voice=voice)
         await communicate.save(input_path)
+        
+        # FIX: Check if audio was actually created
+        if not os.path.exists(input_path) or os.path.getsize(input_path) < 100:
+            await bot.edit_message_text(
+                "❌ Audio yaratilmadi. Iltimos, qisqaroq matn yuboring.",
+                cid, msg.message_id
+            )
+            return
 
         # If funny voice, apply pitch shift using ffmpeg
         if voice_type == "funny":
@@ -592,39 +601,34 @@ async def update_download_progress(cid, msg_id, progress_data, stop_event):
             break
 
 async def search_spotify(query, limit=10):
-    """Search Spotify for track with accurate metadata"""
+    """Search Spotify and return list of tracks"""
     if not spotify_client:
         return None
 
     try:
-        # Search for track
+        # Search for tracks
         results = spotify_client.search(q=query, type='track', limit=limit)
 
         if results and 'tracks' in results and results['tracks']['items']:
-            track = results['tracks']['items'][0]
-
-            # Extract accurate metadata
-            metadata = {
-                'name': track['name'],
-                'artist': track['artists'][0]['name'],
-                'artists': [a['name'] for a in track['artists']],
-                'album': track['album']['name'],
-                'duration_ms': track['duration_ms'],
-                'duration': track['duration_ms'] // 1000,
-                'preview_url': track.get('preview_url'),
-                'external_url': track['external_urls'].get('spotify'),
-                'image_url': track['album']['images'][0]['url'] if track['album']['images'] else None,
-                'track_id': track['id'],
-                'popularity': track.get('popularity', 0)
-            }
-
-            # Create search query for yt-dlp (most accurate match)
-            artist_name = metadata['artist']
-            track_name = metadata['name']
-            metadata['search_query'] = f"{artist_name} - {track_name} official audio"
-
-            logger.info(f"Spotify found: {metadata['search_query']} (popularity: {metadata['popularity']})")
-            return metadata
+            tracks = []
+            for track in results['tracks']['items']:
+                metadata = {
+                    'name': track['name'],
+                    'artist': track['artists'][0]['name'],
+                    'artists': [a['name'] for a in track['artists']],
+                    'album': track['album']['name'],
+                    'duration_ms': track['duration_ms'],
+                    'duration': track['duration_ms'] // 1000,
+                    'preview_url': track.get('preview_url'),
+                    'external_url': track['external_urls'].get('spotify'),
+                    'spotify_url': track['external_urls'].get('spotify'),
+                    'image_url': track['album']['images'][0]['url'] if track['album']['images'] else None,
+                    'track_id': track['id'],
+                    'popularity': track.get('popularity', 0)
+                }
+                tracks.append(metadata)
+            logger.info(f"Spotify found {len(tracks)} tracks for: {query}")
+            return tracks
 
         return None
     except Exception as e:
