@@ -972,7 +972,7 @@ async def search_spotify_top10(query):
     return await search_music_ultrafast(query, limit=8)
 
 async def handle_music_search(m):
-    """EXTREME SPEED music search - YouTube based, no Spotify"""
+    """PROFESSIONAL: Music search with Spotify-style UI"""
     cid = m.chat.id
     query = m.text.strip()
     search_msg = None
@@ -983,63 +983,64 @@ async def handle_music_search(m):
         # Send searching message
         search_msg = await bot.send_message(cid, "🔍 Qidirilmoqda...")
 
-        # EXTREME SPEED: YouTube search only (no slow Spotify)
-        tracks = await search_music_ultrafast(query, limit=8)
+        # PROFESSIONAL: Try Spotify first, fallback to YouTube
+        tracks = None
+        try:
+            if spotify_client:
+                tracks = await search_spotify(query, limit=10)
+        except Exception as e:
+            logger.warning(f"Spotify search failed: {e}")
+        
+        # Fallback to YouTube if Spotify failed or no results
+        if not tracks:
+            tracks = await search_music_ultrafast(query, limit=10)
 
-        # CRITICAL: Check if tracks is empty or None before creating keyboard
+        # PROFESSIONAL FIX: Empty results - NO KEYBOARD, just message
         if not tracks or len(tracks) == 0:
             await bot.edit_message_text(
-                "❌ Musiqa topilmadi. Boshqa qo'shiq nomini yozib ko'ring.",
-                cid, search_msg.message_id,
-                reply_markup=main_menu()
+                "❌ Topilmadi",
+                cid, search_msg.message_id
+                # NO reply_markup to avoid 400 error
             )
             return
 
-        # Build professional numbered list
+        # Build professional numbered list (1-10)
         result_text = f"🎵 *Topilgan natijalar:* `{query}`\n\n"
         result_text += "*Quyidagi qo'shiqlardan birini tanlang:*\n\n"
 
-        for i, track in enumerate(tracks, 1):
-            artist = track['artist']
-            name = track['name']
-            duration = format_duration(track['duration'])
+        for i, track in enumerate(tracks[:10], 1):  # Max 10 results
+            artist = track.get('artist', 'Unknown')
+            name = track.get('name', 'Unknown')
+            duration = format_duration(track.get('duration', 0))
             result_text += f"{i}. {artist} - {name} `[{duration}]`\n"
 
-        # Create inline keyboard with numbers - FAST YouTube callback
+        # PROFESSIONAL: 2-row keyboard (1-5, 6-10) with Spotify-style callbacks
         keyboard_rows = []
-
-        # Row 1: buttons 1-4
-        if len(tracks) >= 1:
-            row1 = [types.InlineKeyboardButton(str(i), callback_data=f"dl:{tracks[i-1]['url']}") for i in range(1, min(5, len(tracks)+1))]
-            if row1:
-                keyboard_rows.append(row1)
-
-        # Row 2: buttons 5-8 (if available)
-        if len(tracks) >= 5:
-            row2 = [types.InlineKeyboardButton(str(i), callback_data=f"dl:{tracks[i-1]['url']}") for i in range(5, min(9, len(tracks)+1))]
-            if row2:
-                keyboard_rows.append(row2)
-
-        # Row 3: Navigation buttons
-        keyboard_rows.append([
-            types.InlineKeyboardButton("⬅️ Orqaga", callback_data="music:back"),
-            types.InlineKeyboardButton("❌ Yopish", callback_data="music:close")
-        ])
-
-        # CRITICAL: Verify keyboard is not empty
-        if not keyboard_rows or all(len(row) == 0 for row in keyboard_rows):
-            logger.error(f"Empty keyboard detected for user {cid}!")
-            await bot.edit_message_text(
-                "❌ Tugmalar yaratishda xatolik.",
-                cid, search_msg.message_id,
-                reply_markup=main_menu()
-            )
-            return
+        track_count = min(len(tracks), 10)
+        
+        # Row 1: buttons 1-5
+        if track_count >= 1:
+            row1 = []
+            for i in range(1, min(6, track_count + 1)):
+                track = tracks[i-1]
+                # Use Spotify URL if available, otherwise YouTube URL
+                url = track.get('spotify_url') or track.get('url', '')
+                row1.append(types.InlineKeyboardButton(str(i), callback_data=f"sp_dl:{url}"))
+            keyboard_rows.append(row1)
+        
+        # Row 2: buttons 6-10 (if available)
+        if track_count >= 6:
+            row2 = []
+            for i in range(6, track_count + 1):
+                track = tracks[i-1]
+                url = track.get('spotify_url') or track.get('url', '')
+                row2.append(types.InlineKeyboardButton(str(i), callback_data=f"sp_dl:{url}"))
+            keyboard_rows.append(row2)
 
         markup = types.InlineKeyboardMarkup(keyboard_rows)
 
-        # Store track data with URL as key
-        user_state[cid + '_tracks'] = {t['url']: t for t in tracks}
+        # Store track data
+        user_state[cid + '_tracks'] = {i+1: t for i, t in enumerate(tracks[:10])}
 
         await bot.edit_message_text(
             result_text,
@@ -1062,6 +1063,66 @@ async def handle_music_search(m):
         except Exception:
             pass
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("sp_dl:"))
+async def spotify_download_handler(call):
+    """PROFESSIONAL: Handle Spotify-style download callback"""
+    cid = call.message.chat.id
+    data = call.data
+    msg_id = call.message.message_id
+
+    try:
+        await bot.answer_callback_query(call.id)
+
+        url = data[6:]  # Remove "sp_dl:" prefix
+
+        # Get track info from stored data by index
+        tracks_dict = user_state.get(cid + '_tracks', {})
+        
+        # Try to find track by URL or use default
+        track = None
+        for t in tracks_dict.values():
+            if t.get('url') == url or t.get('spotify_url') == url:
+                track = t
+                break
+        
+        if not track:
+            # Create minimal track info from URL
+            track = {
+                'id': 'unknown',
+                'name': 'Track',
+                'artist': 'Unknown',
+                'duration': 0,
+                'url': url
+            }
+
+        # Update message to show loading
+        try:
+            await bot.edit_message_text(
+                f"🎵 {track.get('artist', 'Unknown')} - {track.get('name', 'Track')}\n\n⏳ Yuklanmoqda...",
+                cid, msg_id
+            )
+        except Exception:
+            pass
+
+        # STABILITY: Wrap download in try-except
+        try:
+            await download_track_ultrafast(cid, track, url, msg_id)
+        except Exception as download_error:
+            logger.error(f"Download failed: {download_error}")
+            await bot.edit_message_text(
+                f"❌ Yuklab olishda xatolik: {str(download_error)[:100]}",
+                cid, msg_id,
+                reply_markup=main_menu()
+            )
+
+    except Exception as e:
+        logger.error(f"Spotify callback error: {e}")
+        try:
+            await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
+        except Exception:
+            pass
+
+# Keep old handler for backward compatibility
 @bot.callback_query_handler(func=lambda c: c.data.startswith("dl:"))
 async def download_url_handler(call):
     """EXTREME SPEED: Handle download from YouTube URL"""
@@ -1095,8 +1156,16 @@ async def download_url_handler(call):
         except Exception:
             pass
 
-        # EXTREME SPEED: Direct download from URL
-        await download_track_ultrafast(cid, track, url, msg_id)
+        # STABILITY: Wrap download in try-except
+        try:
+            await download_track_ultrafast(cid, track, url, msg_id)
+        except Exception as download_error:
+            logger.error(f"Download failed: {download_error}")
+            await bot.edit_message_text(
+                f"❌ Yuklab olishda xatolik: {str(download_error)[:100]}",
+                cid, msg_id,
+                reply_markup=main_menu()
+            )
 
     except Exception as e:
         logger.error(f"Download error: {e}")
@@ -1477,61 +1546,26 @@ async def run_ffmpeg_async(cmd):
     return await run_in_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=300)
 
 async def handle_video_to_mp3(cid, input_path, output_path, msg_id):
-    """MAX SPEED: Extract audio from video to MP3 - MINIMAL PROCESSING"""
+    """TURBO SPEED: Extract audio from video to MP3"""
     try:
         await bot.edit_message_text("⚡ MP3 yaratilmoqda...", cid, msg_id)
 
-        # MAX SPEED: Try copy audio first (no re-encode), fallback to fast encode
-        # First attempt: copy audio stream if already compatible
-        cmd_copy = [
+        # TURBO SPEED: Single-pass fast MP3 extraction
+        cmd = [
             "ffmpeg", "-y",
             "-hide_banner",
             "-loglevel", "error",
             "-i", input_path,
             "-vn",                     # No video
-            "-c:a", "copy",           # COPY audio (fastest!)
-            "-map_metadata", "-1",    # Strip metadata
-            "-threads", "0",
-            output_path.replace('.mp3', '.aac')  # Try AAC first
+            "-acodec", "libmp3lame",  # Fast MP3 codec
+            "-q:a", "4",              # Quality 4 (fast, good quality)
+            "-preset", "ultrafast",    # Turbo speed preset
+            "-threads", "0",           # All CPU cores
+            "-tune", "zerolatency",   # Low latency
+            output_path
         ]
 
-        result = await run_ffmpeg_async(cmd_copy)
-
-        # If copy failed or file too small, do fast MP3 encode
-        aac_path = output_path.replace('.mp3', '.aac')
-        if result.returncode != 0 or not os.path.exists(aac_path) or os.path.getsize(aac_path) < 1000:
-            safe_remove(aac_path) if os.path.exists(aac_path) else None
-
-            # FAST MP3 encode - minimal quality for speed
-            cmd = [
-                "ffmpeg", "-y",
-                "-hide_banner",
-                "-loglevel", "error",
-                "-i", input_path,
-                "-vn",                     # No video
-                "-acodec", "libmp3lame",
-                "-q:a", "5",              # Lower quality = faster (0-9, 5 is good balance)
-                "-ar", "44100",
-                "-ac", "2",
-                "-map_metadata", "-1",
-                "-threads", "0",
-                output_path
-            ]
-            result = await run_ffmpeg_async(cmd)
-        else:
-            # Convert AAC to MP3 quickly
-            cmd_convert = [
-                "ffmpeg", "-y",
-                "-hide_banner",
-                "-loglevel", "error",
-                "-i", aac_path,
-                "-c:a", "libmp3lame",
-                "-q:a", "5",
-                "-threads", "0",
-                output_path
-            ]
-            await run_ffmpeg_async(cmd_convert)
-            safe_remove(aac_path)
+        result = await run_ffmpeg_async(cmd)
 
         if result.returncode != 0:
             logger.error(f"FFmpeg error: {result.stderr}")
@@ -1603,7 +1637,7 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
         # Direct processing without probing dimensions
         crop_filter = f"crop=min(iw\\,ih):min(iw\\,ih):(iw-min(iw\\,ih))/2:(ih-min(iw\\,ih))/2,fps={FPS},scale={CIRCLE_SIZE}:{CIRCLE_SIZE}:flags=lanczos"
 
-        # MAX SPEED FFmpeg - prioritize speed over quality
+        # TURBO SPEED FFmpeg with zerolatency tuning
         cmd = [
             "ffmpeg", "-y",
             "-hide_banner",
@@ -1612,10 +1646,11 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             # Fast filter: crop + fps + scale
             "-vf", crop_filter,
             "-c:v", "libx264",
-            "-preset", "ultrafast",   # FASTEST preset
-            "-crf", "32",             # Higher CRF = faster, lower quality (acceptable)
+            "-preset", "ultrafast",    # FASTEST preset
+            "-tune", "zerolatency",   # TURBO: Low latency tuning
+            "-crf", "28",             # Balanced quality
             "-pix_fmt", "yuv420p",
-            "-threads", "0",
+            "-threads", "0",          # All CPU cores
             # Copy audio if possible (much faster than re-encode)
             "-c:a", "copy",
             "-t", "60",               # Max 60 sec
@@ -1636,11 +1671,12 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
                 "-vf", crop_filter,
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
-                "-crf", "32",
+                "-tune", "zerolatency",   # TURBO: Low latency tuning
+                "-crf", "28",
                 "-pix_fmt", "yuv420p",
                 "-threads", "0",
                 "-c:a", "aac",
-                "-b:a", "96k",           # Lower bitrate for speed
+                "-b:a", "96k",
                 "-t", "60",
                 "-movflags", "+faststart",
                 output_path
@@ -1747,15 +1783,11 @@ async def main():
         logger.info(f"✅ Semaphores: video={video_semaphore._value}, music={music_semaphore._value}, circle={circle_semaphore._value}")
         logger.info("=" * 50)
 
-        # Start bot polling with optimized settings for Render
+        # Start bot polling - PROFESSIONAL FIX: Only skip_pending parameter
         while True:
             try:
                 logger.info("🔥 BOT IS RUNNING - Waiting for messages...")
-                await bot.infinity_polling(
-                    skip_pending=True,
-                    timeout=30,
-                    long_polling_timeout=10
-                )
+                await bot.infinity_polling(skip_pending=True)
             except Exception as e:
                 logger.error(f"❌ Polling error: {e}")
                 logger.info("🔄 Restarting polling in 5 seconds...")
