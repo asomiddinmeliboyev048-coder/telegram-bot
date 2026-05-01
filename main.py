@@ -653,10 +653,14 @@ async def youtube_download_handler(call):
             await bot.edit_message_text("❌ Noto'g'ri video ID.", cid, msg_id, reply_markup=main_menu())
             return
 
+        # Track ma'lumotlarini user_state dan olish
+        tracks_dict = user_state.get(str(cid) + '_tracks', {})
+        track = tracks_dict.get(youtube_id, {'name': 'Track', 'artist': 'YouTube'})
+
         # Tezkor yuklash: qidiruvsiz, to'g'ridan-to'g'ri yuklash
         try:
             await bot.edit_message_text(
-                "⏳ Darhol yuklash boshlandi...",
+                f"🎵 {track.get('artist', 'Unknown')} - {track.get('name', 'Unknown')}\n\n⏳ Yuklanmoqda...",
                 cid, msg_id
             )
         except Exception:
@@ -664,16 +668,17 @@ async def youtube_download_handler(call):
 
         # To'g'ridan-to'g'ri URL yaratish va yuklash (qidiruvsiz)
         url = f"https://www.youtube.com/watch?v={youtube_id}"
-        track = {'name': 'Track', 'artist': 'YouTube'}
-        await download_youtube_audio_fast(cid, youtube_id, url, msg_id)
+        await download_youtube_audio_fast(cid, youtube_id, url, msg_id, track)
     except Exception as e:
         logger.error(f"YouTube download error: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         try:
-            await bot.edit_message_text(f"❌ Xatolik: {str(e)[:100]}", cid, msg_id, reply_markup=main_menu())
+            await bot.edit_message_text(f"❌ Xatolik: {str(e)[:200]}", cid, msg_id, reply_markup=main_menu())
         except Exception:
             pass
 
-async def download_youtube_audio_fast(cid, youtube_id, url, msg_id):
+async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
     """Tezkor yuklash: To'g'ridan-to'g'ri YouTube ID orqali, qidiruvsiz"""
     lazy_load_modules()
     file_path = None
@@ -686,8 +691,8 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id):
             with open(cached_file, "rb") as f:
                 await bot.send_audio(
                     cid, f,
-                    title="Music",
-                    performer="YouTube",
+                    title=track.get('name', 'Music') if track else 'Music',
+                    performer=track.get('artist', 'YouTube') if track else 'YouTube',
                     caption=f"🎵 YouTube Music\n⚡ Keshdan\n✅ @foyda1ii_bot",
                     reply_markup=main_menu()
                 )
@@ -756,9 +761,9 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id):
         await cache_audio_file(cache_key, file_path)
         await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
 
-        title = info.get('title', 'Music')
-        uploader = info.get('uploader', 'YouTube')
-        duration = info.get('duration', 0)
+        title = info.get('title', track.get('name', 'Music') if track else 'Music')
+        uploader = info.get('uploader', track.get('artist', 'YouTube') if track else 'YouTube')
+        duration = info.get('duration', track.get('duration', 0) if track else 0)
 
         with open(file_path, "rb") as f:
             await bot.send_audio(
@@ -786,10 +791,10 @@ async def download_youtube_audio(cid, track, url, msg_id):
     """Original function - delegate to fast version"""
     youtube_id = track.get('id', '')
     if youtube_id:
-        await download_youtube_audio_fast(cid, youtube_id, url, msg_id)
+        await download_youtube_audio_fast(cid, youtube_id, url, msg_id, track)
     else:
         # Fallback to direct URL
-        await download_youtube_audio_fast(cid, 'unknown', url, msg_id)
+        await download_youtube_audio_fast(cid, 'unknown', url, msg_id, track)
 
 # ================= VIDEO QUEUE WORKER =================
 async def video_queue_worker():
