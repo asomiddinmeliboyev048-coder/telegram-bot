@@ -620,14 +620,14 @@ async def handle_music_search(m):
         keyboard_rows = []
         track_count = min(len(tracks), 10)
         if track_count >= 1:
-            row1 = [types.InlineKeyboardButton(str(i), callback_data=f"yt_dl:{i}") for i in range(1, min(6, track_count + 1))]
+            row1 = [types.InlineKeyboardButton(str(i), callback_data=f"yt_dl:{tracks[i-1]['id']}") for i in range(1, min(6, track_count + 1))]
             keyboard_rows.append(row1)
         if track_count >= 6:
-            row2 = [types.InlineKeyboardButton(str(i), callback_data=f"yt_dl:{i}") for i in range(6, track_count + 1)]
+            row2 = [types.InlineKeyboardButton(str(i), callback_data=f"yt_dl:{tracks[i-1]['id']}") for i in range(6, track_count + 1)]
             keyboard_rows.append(row2)
 
         markup = types.InlineKeyboardMarkup(keyboard_rows)
-        user_state[str(cid) + '_tracks'] = {str(i + 1): t for i, t in enumerate(tracks[:10])}
+        user_state[str(cid) + '_tracks'] = {t['id']: t for t in tracks[:10]}
 
         await bot.edit_message_text(result_text, cid, search_msg.message_id, parse_mode='Markdown', reply_markup=markup)
     except Exception as e:
@@ -647,23 +647,22 @@ async def youtube_download_handler(call):
     msg_id = call.message.message_id
     try:
         await bot.answer_callback_query(call.id)
-        index = data[6:]
+        youtube_id = data[6:]  # Extract YouTube ID from "yt_dl:VIDEO_ID"
         tracks_dict = user_state.get(str(cid) + '_tracks', {})
-        track = tracks_dict.get(index)
+        track = tracks_dict.get(youtube_id)
         if not track:
             await bot.edit_message_text("❌ Qo'shiq ma'lumotlari topilmadi. Qayta urinib ko'ring.", cid, msg_id, reply_markup=main_menu())
             return
+        # Tezkor yuklash: qidiruvsiz, to'g'ridan-to'g'ri yuklash
         try:
             await bot.edit_message_text(
-                f"🎵 {track.get('artist', 'Unknown')} - {track.get('name', 'Unknown')}\n\n⏳ Yuklanmoqda...",
+                f"🎵 {track.get('artist', 'Unknown')} - {track.get('name', 'Unknown')}\n\n⏳ Musiqa yuklanmoqda, iltimos kuting...",
                 cid, msg_id
             )
         except Exception:
             pass
-        url = track.get('url', '')
-        if not url:
-            await bot.edit_message_text("❌ Video URL topilmadi", cid, msg_id, reply_markup=main_menu())
-            return
+        # YouTube ID orqali to'g'ridan-to'g'ri yuklash (qidiruvsiz)
+        url = f"https://youtube.com/watch?v={youtube_id}"
         await download_youtube_audio(cid, track, url, msg_id)
     except Exception as e:
         logger.error(f"YouTube download error: {e}")
