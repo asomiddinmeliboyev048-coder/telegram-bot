@@ -699,6 +699,13 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
             await bot.delete_message(cid, msg_id)
             return
 
+        # YouTube blokidan o'tish uchun headers qo'shish
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://www.google.com/',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        
         # Optimized yt_dlp settings for fast download with YouTube bypass
         ydl_opts = {
             'format': 'bestaudio/best',
@@ -711,10 +718,13 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,  # Faqat bitta video
-            'max_filesize': 50 * 1024 * 1024,
+            'max_filesize': 40 * 1024 * 1024,  # 40MB limit
             'socket_timeout': 30,
-            'retries': 2,
+            'retries': 3,
             'source_address': '0.0.0.0',  # Bypass YouTube blocking
+            'headers': headers,  # User-agent va referer
+            'geo_bypass': True,  # Geo cheklovlarni chetlab o'tish
+            'geo_bypass_country': 'US',
         }
 
         # Download with 60 second timeout
@@ -726,12 +736,17 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
                     timeout=60
                 )
         except asyncio.TimeoutError:
+            error_msg = "❌ Yuklash vaqti tugadi (60 soniya)"
             logger.warning("Download timeout after 60 seconds")
-            await bot.edit_message_text("❌ Yuklash vaqti tugadi (60 soniya)", cid, msg_id, reply_markup=main_menu())
+            await bot.send_message(cid, error_msg, reply_markup=main_menu())
+            await bot.delete_message(cid, msg_id)
             return
         except Exception as e:
+            error_detail = str(e)
+            error_msg = f"❌ Yuklab olishda xatolik:\n<code>{error_detail[:400]}</code>"
             logger.warning(f"Fast download failed: {e}")
-            await bot.edit_message_text(f"❌ Yuklab olishda xatolik: {str(e)[:200]}", cid, msg_id, reply_markup=main_menu())
+            await bot.send_message(cid, error_msg, parse_mode='HTML', reply_markup=main_menu())
+            await bot.delete_message(cid, msg_id)
             return
 
         if not info:
@@ -749,11 +764,13 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
         file_path = str(downloaded_files[0])
         file_size = os.path.getsize(file_path)
         if file_size == 0:
-            await bot.edit_message_text("❌ Fayl bo'sh (0 bytes)", cid, msg_id, reply_markup=main_menu())
+            await bot.send_message(cid, "❌ Fayl bo'sh (0 bytes)", reply_markup=main_menu())
+            await bot.delete_message(cid, msg_id)
             safe_remove(file_path)
             return
-        if file_size > 50 * 1024 * 1024:
-            await bot.edit_message_text("❌ Fayl juda katta (>50MB)", cid, msg_id, reply_markup=main_menu())
+        if file_size > 40 * 1024 * 1024:
+            await bot.send_message(cid, "❌ Fayl juda katta (>40MB)", reply_markup=main_menu())
+            await bot.delete_message(cid, msg_id)
             safe_remove(file_path)
             return
 
@@ -778,14 +795,23 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
         safe_remove(file_path)
 
     except Exception as e:
-        error_msg = f"❌ Yuklash xatosi: {str(e)[:300]}"
+        import traceback
+        error_detail = str(e)
+        error_trace = traceback.format_exc()
+        error_msg = f"❌ Yuklash xatosi:\n<code>{error_detail[:400]}</code>"
         logger.error(f"Fast download error: {e}")
+        logger.error(f"Traceback: {error_trace}")
         try:
-            await bot.edit_message_text(error_msg, cid, msg_id, reply_markup=main_menu())
+            await bot.send_message(cid, error_msg, parse_mode='HTML', reply_markup=main_menu())
+            await bot.delete_message(cid, msg_id)
+        except Exception as inner_e:
+            logger.error(f"Failed to send error message: {inner_e}")
+        # Temp papkasini tozalash
+        try:
+            for f in Path(TEMP_DIR).glob(f"{cid}_*"):
+                safe_remove(str(f))
         except Exception:
             pass
-        if file_path:
-            safe_remove(file_path)
 
 async def download_youtube_audio(cid, track, url, msg_id):
     """Original function - delegate to fast version"""
