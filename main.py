@@ -694,7 +694,7 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id):
             await bot.delete_message(cid, msg_id)
             return
 
-        # Optimized yt_dlp settings for fast download
+        # Optimized yt_dlp settings for fast download with YouTube bypass
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(TEMP_DIR, f'{cid}_%(title)s.%(ext)s'),
@@ -709,16 +709,24 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id):
             'max_filesize': 50 * 1024 * 1024,
             'socket_timeout': 30,
             'retries': 2,
+            'source_address': '0.0.0.0',  # Bypass YouTube blocking
         }
 
-        # Download in thread pool (non-blocking)
+        # Download with 60 second timeout
         info = None
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await run_in_thread(ydl.extract_info, url, download=True)
+                info = await asyncio.wait_for(
+                    run_in_thread(ydl.extract_info, url, download=True),
+                    timeout=60
+                )
+        except asyncio.TimeoutError:
+            logger.warning("Download timeout after 60 seconds")
+            await bot.edit_message_text("❌ Yuklash vaqti tugadi (60 soniya)", cid, msg_id, reply_markup=main_menu())
+            return
         except Exception as e:
             logger.warning(f"Fast download failed: {e}")
-            await bot.edit_message_text("❌ Yuklab olishda xatolik", cid, msg_id, reply_markup=main_menu())
+            await bot.edit_message_text(f"❌ Yuklab olishda xatolik: {str(e)[:200]}", cid, msg_id, reply_markup=main_menu())
             return
 
         if not info:
@@ -734,8 +742,14 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id):
             return
 
         file_path = str(downloaded_files[0])
-        if os.path.getsize(file_path) > 50 * 1024 * 1024:
-            await bot.edit_message_text("❌ Fayl juda katta", cid, msg_id, reply_markup=main_menu())
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            await bot.edit_message_text("❌ Fayl bo'sh (0 bytes)", cid, msg_id, reply_markup=main_menu())
+            safe_remove(file_path)
+            return
+        if file_size > 50 * 1024 * 1024:
+            await bot.edit_message_text("❌ Fayl juda katta (>50MB)", cid, msg_id, reply_markup=main_menu())
+            safe_remove(file_path)
             return
 
         # Cache and send
@@ -759,9 +773,10 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id):
         safe_remove(file_path)
 
     except Exception as e:
+        error_msg = f"❌ Yuklash xatosi: {str(e)[:300]}"
         logger.error(f"Fast download error: {e}")
         try:
-            await bot.edit_message_text("❌ Xatolik", cid, msg_id, reply_markup=main_menu())
+            await bot.edit_message_text(error_msg, cid, msg_id, reply_markup=main_menu())
         except Exception:
             pass
         if file_path:
