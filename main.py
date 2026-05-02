@@ -738,6 +738,7 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
             'nocheckcertificate': True,  # SSL sertifikatini tekshirmaslik
             'prefer_insecure': True,  # HTTP ustidan HTTPS afzal qilish
             'youtube_include_dash_manifest': False,  # DASH manifestni o'tkazib yuborish
+            'cookiefile': 'www.youtube.com_cookies.txt',  # Cookie fayli - YouTube blokidan o'tish uchun
             'extractor_args': {
                 'youtube': {
                     'player_client': client_type,  # Tasodifiy client (ios/android)
@@ -762,9 +763,10 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
             return
         except Exception as e:
             error_detail = str(e)
-            # 'Sign in to confirm' xatosini aniqlash
-            if 'sign in' in error_detail.lower() or 'confirm' in error_detail.lower():
-                error_msg = "❌ YouTube hozirda ushbu videoni blokladi, boshqa qo'shiqni sinab ko'ring"
+            # 'Sign in to confirm' va boshqa YouTube blokirovka xatolarini aniqlash
+            error_lower = error_detail.lower()
+            if any(kw in error_lower for kw in ['sign in', 'confirm', 'bot detected', 'unavailable', 'blocked', 'forbidden', 'access denied']):
+                error_msg = "❌ YouTube blokladi, iltimos boshqa qo'shiqni sinab ko'ring"
             else:
                 error_msg = f"❌ Yuklab olishda xatolik:\n<code>{error_detail[:400]}</code>"
             logger.warning(f"Fast download failed: {e}")
@@ -964,11 +966,11 @@ async def check_ffmpeg_installed():
 
 async def handle_circle_video(cid, input_path, output_path, msg_id):
     try:
-        # Video hajmini tekshirish (15MB dan katta bo'lsa xatolik)
+        # Video hajmini tekshirish (50MB dan katta bo'lsa xatolik - yuklash cheklovi)
         file_size = os.path.getsize(input_path)
-        if file_size > 15 * 1024 * 1024:  # 15MB
+        if file_size > 50 * 1024 * 1024:  # 50MB
             await bot.edit_message_text(
-                "❌ Video juda katta (>15MB). Iltimos, kichikroq video yuboring.",
+                "❌ Video juda katta (>50MB). Iltimos, kichikroq video yuboring.",
                 cid, msg_id, reply_markup=main_menu()
             )
             safe_remove(input_path)
@@ -985,41 +987,52 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
 
         await bot.edit_message_text("⚡ Video ishlanmoqda...", cid, msg_id)
 
-        # 640x640 mp4 formatida Circle video yaratish (60 soniya dan uzun bo'lsa qirqish)
-        cmd = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-i", input_path,
-            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-            "-threads", "0", "-crf", "23", "-s", "640x640", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
-            "-t", "60", "-movflags", "+faststart",
-            "-f", "mp4", output_path
-        ]
+        # 640x640 kvadrat video yaratish: markazdan kesish (crop), 60 soniya limit
+        # scale=640:640:force_original_aspect_ratio=decrease,pad=640:640:(ow-iw)/2:(oh-ih)/2 - kvadrat qilish
+        vf_filter = "crop='min(iw,ih)':'min(iw,ih)',scale=640:640:force_original_aspect_ratio=increase,crop=640:640,setsar=1"
         
-        # Agar siqish kerak bo'lsa, bitrate qo'shish
         if needs_compression:
+            # Siqilgan versiya - bitrate kamaytirilgan
             cmd = [
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                 "-i", input_path,
+                "-t", "60",  # 60 soniya limit
+                "-vf", vf_filter,  # Kvadrat qilish va o'lcham
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                "-threads", "0", "-b:v", "1M", "-s", "640x640", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "96k", "-ar", "44100",
-                "-t", "60", "-movflags", "+faststart",
+                "-threads", "0", "-b:v", "800k", "-maxrate", "1M", "-bufsize", "2M",
+                "-pix_fmt", "yuv420p", "-r", "30",
+                "-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-ac", "2",
+                "-movflags", "+faststart",
+                "-f", "mp4", output_path
+            ]
+        else:
+            # Oddiy versiya
+            cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-i", input_path,
+                "-t", "60",  # 60 soniya limit
+                "-vf", vf_filter,  # Kvadrat qilish va o'lcham
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                "-threads", "0", "-crf", "23", "-pix_fmt", "yuv420p", "-r", "30",
+                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                "-movflags", "+faststart",
                 "-f", "mp4", output_path
             ]
         
         result = await run_ffmpeg_async(cmd)
 
+        # Agar muvaffaqiyatsiz bo'lsa, audio'siz urinish
         if result.returncode != 0:
-            # Video audio bilan muammolarni hal qilish uchun ikkinchi urinish
             cmd_fallback = [
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                 "-i", input_path,
+                "-t", "60",
+                "-vf", vf_filter,
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                "-threads", "0", "-crf", "28", "-s", "640x640", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "96k", "-ar", "44100",
-                "-t", "60", "-movflags", "+faststart",
-                "-an", "-f", "mp4", output_path
+                "-threads", "0", "-crf", "28", "-pix_fmt", "yuv420p", "-r", "30",
+                "-an",  # Audio yo'q
+                "-movflags", "+faststart",
+                "-f", "mp4", output_path
             ]
             result = await run_ffmpeg_async(cmd_fallback)
 
@@ -1035,16 +1048,38 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             safe_remove(output_path)
             return
 
-        # Chiqarilgan video hajmini tekshirish
+        # Chiqarilgan video hajmini tekshirish (Telegram video note limiti ~20MB)
         output_size = os.path.getsize(output_path)
-        if output_size > 20 * 1024 * 1024:  # 20MB dan katta
-            await bot.edit_message_text(
-                "❌ Video siqishdan keyin ham juda katta (>20MB). Iltimos, kichikroq video yuboring.",
-                cid, msg_id, reply_markup=main_menu()
-            )
-            safe_remove(input_path)
-            safe_remove(output_path)
-            return
+        if output_size > 20 * 1024 * 1024:  # 20MB dan katta bo'lsa siqishga urinish
+            await bot.edit_message_text("⚡ Video hajmi katta, qayta siqilmoqda...", cid, msg_id)
+            
+            compressed_path = output_path.replace('.mp4', '_compressed.mp4')
+            cmd_compress = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-i", output_path,
+                "-vf", "scale=480:480:force_original_aspect_ratio=increase,crop=480:480,setsar=1",
+                "-c:v", "libx264", "-preset", "ultrafast",
+                "-threads", "0", "-b:v", "500k", "-maxrate", "600k",
+                "-pix_fmt", "yuv420p", "-r", "24",
+                "-c:a", "aac", "-b:a", "64k", "-ar", "44100",
+                "-movflags", "+faststart",
+                "-f", "mp4", compressed_path
+            ]
+            compress_result = await run_ffmpeg_async(cmd_compress)
+            
+            if compress_result.returncode == 0 and os.path.exists(compressed_path):
+                safe_remove(output_path)
+                output_path = compressed_path
+                output_size = os.path.getsize(output_path)
+            
+            if output_size > 20 * 1024 * 1024:
+                await bot.edit_message_text(
+                    "❌ Video siqishdan keyin ham juda katta (>20MB). Iltimos, kichikroq video yuboring.",
+                    cid, msg_id, reply_markup=main_menu()
+                )
+                safe_remove(input_path)
+                safe_remove(output_path)
+                return
 
         await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
         

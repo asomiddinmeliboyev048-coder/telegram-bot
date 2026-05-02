@@ -1,2 +1,32 @@
+# Environment
 .env
+
+# Python
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Database & Logs
+bot.db
+bot.log
+*.log
+
+# YouTube Cookies (Security)
+www.youtube.com_cookies.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
