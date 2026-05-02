@@ -706,8 +706,17 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
             'Accept-Language': 'en-US,en;q=0.9',
         }
         
+        # Random client tanlash (ios yoki android) - YouTube blokidan o'tish uchun
+        import random
+        client_type = random.choice(['ios', 'android'])
+        
         # Optimized yt_dlp settings for fast download with YouTube bypass
         # PoToken va Visitor Data - YouTube blokidan o'tish uchun
+        # cookies.txt faylini ishlatish (agar mavjud bo'lsa):
+        # 1. Browser dan cookies.txt export qiling
+        # 2. Loyiha rootiga 'cookies.txt' nomi bilan saqlang
+        # 3. Quyidagi 'cookiefile' parametrini yoqing:
+        # 'cookiefile': 'cookies.txt',
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(TEMP_DIR, f'{cid}_%(title)s.%(ext)s'),
@@ -726,10 +735,12 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
             'headers': headers,  # User-agent va referer
             'geo_bypass': True,  # Geo cheklovlarni chetlab o'tish
             'geo_bypass_country': 'US',
+            'nocheckcertificate': True,  # SSL sertifikatini tekshirmaslik
+            'prefer_insecure': True,  # HTTP ustidan HTTPS afzal qilish
             'youtube_include_dash_manifest': False,  # DASH manifestni o'tkazib yuborish
             'extractor_args': {
                 'youtube': {
-                    'player_client': 'ios',  # iOS client - blokdan o'tish osonroq
+                    'player_client': client_type,  # Tasodifiy client (ios/android)
                     'player_skip': ['webpage', 'configs', 'js'],  # Tezlik uchun
                 }
             },
@@ -963,6 +974,9 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             safe_remove(input_path)
             return
 
+        # 10MB dan katta bo'lsa siqish kerakligini belgilash
+        needs_compression = file_size > 10 * 1024 * 1024  # 10MB
+
         ffmpeg_installed = await check_ffmpeg_installed()
         if not ffmpeg_installed:
             await bot.edit_message_text("❌ FFmpeg o'rnatilmagan.", cid, msg_id, reply_markup=main_menu())
@@ -971,7 +985,7 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
 
         await bot.edit_message_text("⚡ Video ishlanmoqda...", cid, msg_id)
 
-        # 640x640 mp4 formatida Circle video yaratish
+        # 640x640 mp4 formatida Circle video yaratish (60 soniya dan uzun bo'lsa qirqish)
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-i", input_path,
@@ -981,6 +995,19 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             "-t", "60", "-movflags", "+faststart",
             "-f", "mp4", output_path
         ]
+        
+        # Agar siqish kerak bo'lsa, bitrate qo'shish
+        if needs_compression:
+            cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-i", input_path,
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                "-threads", "0", "-b:v", "1M", "-s", "640x640", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "96k", "-ar", "44100",
+                "-t", "60", "-movflags", "+faststart",
+                "-f", "mp4", output_path
+            ]
+        
         result = await run_ffmpeg_async(cmd)
 
         if result.returncode != 0:
@@ -1020,9 +1047,23 @@ async def handle_circle_video(cid, input_path, output_path, msg_id):
             return
 
         await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
-        with open(output_path, "rb") as f:
-            await bot.send_video_note(cid, f, length=640, reply_markup=main_menu())
-        await bot.delete_message(cid, msg_id)
+        
+        # Telegram API cheklovi uchun try-except
+        try:
+            with open(output_path, "rb") as f:
+                await bot.send_video_note(cid, f, length=640, reply_markup=main_menu())
+            await bot.delete_message(cid, msg_id)
+        except Exception as send_error:
+            error_str = str(send_error).lower()
+            if 'too large' in error_str or 'entity_too_large' in error_str or 'file is too big' in error_str:
+                await bot.send_message(
+                    cid,
+                    "❌ Video juda katta, uni siqishning iloji bo'lmadi. Iltimos, kichikroq video yuboring.",
+                    reply_markup=main_menu()
+                )
+                await bot.delete_message(cid, msg_id)
+            else:
+                raise send_error
 
     except subprocess.TimeoutExpired:
         await bot.edit_message_text("❌ Vaqt tugadi. Video juda katta.", cid, msg_id, reply_markup=main_menu())
