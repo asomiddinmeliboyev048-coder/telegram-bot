@@ -707,6 +707,7 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
         }
         
         # Optimized yt_dlp settings for fast download with YouTube bypass
+        # PoToken va Visitor Data - YouTube blokidan o'tish uchun
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(TEMP_DIR, f'{cid}_%(title)s.%(ext)s'),
@@ -725,6 +726,13 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
             'headers': headers,  # User-agent va referer
             'geo_bypass': True,  # Geo cheklovlarni chetlab o'tish
             'geo_bypass_country': 'US',
+            'youtube_include_dash_manifest': False,  # DASH manifestni o'tkazib yuborish
+            'extractor_args': {
+                'youtube': {
+                    'player_client': 'ios',  # iOS client - blokdan o'tish osonroq
+                    'player_skip': ['webpage', 'configs', 'js'],  # Tezlik uchun
+                }
+            },
         }
 
         # Download with 60 second timeout
@@ -743,10 +751,20 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
             return
         except Exception as e:
             error_detail = str(e)
-            error_msg = f"❌ Yuklab olishda xatolik:\n<code>{error_detail[:400]}</code>"
+            # 'Sign in to confirm' xatosini aniqlash
+            if 'sign in' in error_detail.lower() or 'confirm' in error_detail.lower():
+                error_msg = "❌ YouTube hozirda ushbu videoni blokladi, boshqa qo'shiqni sinab ko'ring"
+            else:
+                error_msg = f"❌ Yuklab olishda xatolik:\n<code>{error_detail[:400]}</code>"
             logger.warning(f"Fast download failed: {e}")
             await bot.send_message(cid, error_msg, parse_mode='HTML', reply_markup=main_menu())
             await bot.delete_message(cid, msg_id)
+            # Temp fayllarni tozalash
+            try:
+                for f in Path(TEMP_DIR).glob(f"{cid}_*"):
+                    safe_remove(str(f))
+            except Exception:
+                pass
             return
 
         if not info:
@@ -935,51 +953,84 @@ async def check_ffmpeg_installed():
 
 async def handle_circle_video(cid, input_path, output_path, msg_id):
     try:
+        # Video hajmini tekshirish (15MB dan katta bo'lsa xatolik)
+        file_size = os.path.getsize(input_path)
+        if file_size > 15 * 1024 * 1024:  # 15MB
+            await bot.edit_message_text(
+                "❌ Video juda katta (>15MB). Iltimos, kichikroq video yuboring.",
+                cid, msg_id, reply_markup=main_menu()
+            )
+            safe_remove(input_path)
+            return
+
         ffmpeg_installed = await check_ffmpeg_installed()
         if not ffmpeg_installed:
-            await bot.edit_message_text("❌ FFmpeg o'rnatilmagan.", cid, msg_id)
+            await bot.edit_message_text("❌ FFmpeg o'rnatilmagan.", cid, msg_id, reply_markup=main_menu())
+            safe_remove(input_path)
             return
+
         await bot.edit_message_text("⚡ Video ishlanmoqda...", cid, msg_id)
+
+        # 640x640 mp4 formatida Circle video yaratish
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-i", input_path,
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-            "-threads", "0", "-crf", "28", "-s", "320x320", "-pix_fmt", "yuv420p",
-            "-c:a", "copy", "-t", "60", "-movflags", "+faststart", output_path
+            "-threads", "0", "-crf", "23", "-s", "640x640", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+            "-t", "60", "-movflags", "+faststart",
+            "-f", "mp4", output_path
         ]
         result = await run_ffmpeg_async(cmd)
+
         if result.returncode != 0:
-            cmd_audio = [
+            # Video audio bilan muammolarni hal qilish uchun ikkinchi urinish
+            cmd_fallback = [
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                 "-i", input_path,
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                "-threads", "0", "-crf", "28", "-s", "320x320", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "96k", "-t", "60", "-movflags", "+faststart", output_path
+                "-threads", "0", "-crf", "28", "-s", "640x640", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "96k", "-ar", "44100",
+                "-t", "60", "-movflags", "+faststart",
+                "-an", "-f", "mp4", output_path
             ]
-            result = await run_ffmpeg_async(cmd_audio)
+            result = await run_ffmpeg_async(cmd_fallback)
 
         if result.returncode != 0:
-            await bot.edit_message_text("❌ Video konvertatsiyada xatolik.", cid, msg_id)
+            await bot.edit_message_text("❌ Video konvertatsiyada xatolik.", cid, msg_id, reply_markup=main_menu())
             safe_remove(input_path)
+            safe_remove(output_path)
             return
+
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-            await bot.edit_message_text("❌ Video fayl yaratilmadi.", cid, msg_id)
+            await bot.edit_message_text("❌ Video fayl yaratilmadi.", cid, msg_id, reply_markup=main_menu())
             safe_remove(input_path)
+            safe_remove(output_path)
+            return
+
+        # Chiqarilgan video hajmini tekshirish
+        output_size = os.path.getsize(output_path)
+        if output_size > 20 * 1024 * 1024:  # 20MB dan katta
+            await bot.edit_message_text(
+                "❌ Video siqishdan keyin ham juda katta (>20MB). Iltimos, kichikroq video yuboring.",
+                cid, msg_id, reply_markup=main_menu()
+            )
+            safe_remove(input_path)
+            safe_remove(output_path)
             return
 
         await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
         with open(output_path, "rb") as f:
-            await bot.send_video_note(cid, f, length=CIRCLE_SIZE, reply_markup=main_menu())
+            await bot.send_video_note(cid, f, length=640, reply_markup=main_menu())
         await bot.delete_message(cid, msg_id)
-        safe_remove(input_path)
-        safe_remove(output_path)
+
     except subprocess.TimeoutExpired:
-        await bot.edit_message_text("❌ Vaqt tugadi. Video juda katta.", cid, msg_id)
-        safe_remove(input_path)
-        safe_remove(output_path)
+        await bot.edit_message_text("❌ Vaqt tugadi. Video juda katta.", cid, msg_id, reply_markup=main_menu())
     except Exception as e:
         logger.error(f"Circle video error: {e}")
-        await bot.edit_message_text(f"❌ Xatolik: {str(e)[:100]}", cid, msg_id)
+        await bot.edit_message_text(f"❌ Xatolik: {str(e)[:200]}", cid, msg_id, reply_markup=main_menu())
+    finally:
+        # Har doim temp fayllarni tozalash
         safe_remove(input_path)
         safe_remove(output_path)
 
