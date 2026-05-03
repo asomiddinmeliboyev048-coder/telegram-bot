@@ -16,6 +16,9 @@ from dotenv import load_dotenv
 from telebot import types
 from telebot.async_telebot import AsyncTeleBot
 
+# Database import
+from database import add_user, get_all_users, get_users_count, export_users_to_txt, get_user_stats
+
 # Lazy imports - loaded only when needed
 yt_dlp = None
 edge_tts = None
@@ -178,22 +181,17 @@ def require_subscription(handler):
     return wrapper
 
 # ================= USERS =================
-def save_user(uid):
+def save_user(user_id, username=None, first_name=None, last_name=None):
+    """Foydalanuvchini SQLite bazaga saqlash"""
     try:
-        if not os.path.exists("users.txt"):
-            open("users.txt", "w").close()
-        users = open("users.txt").read().splitlines()
-        if str(uid) not in users:
-            with open("users.txt", "a") as f:
-                f.write(str(uid) + "\n")
+        add_user(user_id, username, first_name, last_name)
     except Exception as e:
-        logger.error(f"Error saving user {uid}: {e}")
+        logger.error(f"Error saving user {user_id}: {e}")
 
 def get_users():
+    """Barcha foydalanuvchilarning ID larini olish (SQLite)"""
     try:
-        if not os.path.exists("users.txt"):
-            return []
-        return open("users.txt").read().splitlines()
+        return get_all_users()
     except Exception as e:
         logger.error(f"Error reading users: {e}")
         return []
@@ -215,7 +213,7 @@ def voice_menu():
 def admin_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("📢 Broadcast", "📊 Statistika")
-    kb.add("📣 Auto Post")
+    kb.add("📣 Auto Post", "📤 Eksport (Telega.io)")
     kb.add("🔙 Orqaga")
     return kb
 
@@ -238,7 +236,11 @@ async def start(m):
         print(f"DEBUG: /start received from {m.chat.id}")
         cid = m.chat.id
         user_id = m.from_user.id
-        save_user(user_id)
+        # Foydalanuvchi ma'lumotlarini to'liq saqlash
+        username = m.from_user.username if m.from_user.username else None
+        first_name = m.from_user.first_name if m.from_user.first_name else None
+        last_name = m.from_user.last_name if m.from_user.last_name else None
+        save_user(user_id, username, first_name, last_name)
 
         is_subscribed = await check_subscription(user_id)
         if not is_subscribed:
@@ -263,6 +265,17 @@ async def admin(m):
     except Exception as e:
         logger.error(f"Admin error: {e}")
 
+@bot.message_handler(commands=['export_users'])
+async def export_users_cmd(m):
+    """Foydalanuvchilarni eksport qilish - faqat admin uchun"""
+    try:
+        if m.from_user.id == OWNER_ID:
+            await handle_export_users(m)
+        else:
+            await bot.send_message(m.chat.id, "❌ Bu komanda faqat admin uchun!")
+    except Exception as e:
+        logger.error(f"Export users command error: {e}")
+
 AUTO_POST_TEXT = None
 
 # ================= TEXT HANDLER =================
@@ -273,6 +286,15 @@ async def text_handler(m):
     logger.info(f"📩 [MESSAGE] User: {cid}, Text: {txt[:100]}")
     user_id = m.from_user.id
     state = user_state.get(cid)
+
+    # HAR BIR XABARDA foydalanuvchini bazaga saqlash
+    try:
+        username = m.from_user.username if m.from_user.username else None
+        first_name = m.from_user.first_name if m.from_user.first_name else None
+        last_name = m.from_user.last_name if m.from_user.last_name else None
+        save_user(user_id, username, first_name, last_name)
+    except Exception as e:
+        logger.error(f"User save error: {e}")
 
     is_subscribed = await check_subscription(user_id)
     if not is_subscribed:
@@ -314,7 +336,15 @@ async def text_handler(m):
             return
 
         if txt == "📊 Statistika" and user_id == OWNER_ID:
-            await bot.send_message(cid, f"👥 Foydalanuvchilar: {len(get_users())}")
+            stats = get_user_stats()
+            stats_text = f"""📊 <b>Bot statistikasi:</b>
+
+👥 Jami foydalanuvchilar: <b>{stats['total']}</b>
+📅 Bugun qo'shilgan: <b>{stats['today']}</b>
+📆 Bu hafta qo'shilgan: <b>{stats['week']}</b>
+
+✅ @foyda1ii_bot"""
+            await bot.send_message(cid, stats_text, parse_mode='HTML')
             return
 
         if txt == "📢 Broadcast" and user_id == OWNER_ID:
@@ -325,6 +355,10 @@ async def text_handler(m):
         if txt == "📣 Auto Post" and user_id == OWNER_ID:
             user_state[cid] = "autopost"
             await bot.send_message(cid, "📤 Auto post matnini yuboring:")
+            return
+
+        if txt == "📤 Eksport (Telega.io)" and user_id == OWNER_ID:
+            await handle_export_users(m)
             return
 
         if state == "broadcast":
@@ -467,6 +501,42 @@ async def handle_broadcast(m):
     except Exception as e:
         logger.error(f"Broadcast error: {e}")
         await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
+
+# ================= EXPORT USERS (Telega.io) =================
+async def handle_export_users(m):
+    """Foydalanuvchilarni .txt faylga eksport qilish (Telega.io format)"""
+    cid = m.chat.id
+    try:
+        # Baza bo'shmi tekshirish
+        users_count = get_users_count()
+        if users_count == 0:
+            await bot.send_message(cid, "⚠️ Bazada foydalanuvchilar yo'q!")
+            return
+
+        await bot.send_message(cid, f"📤 {users_count} ta foydalanuvchi eksport qilinmoqda...")
+
+        # Eksport qilish
+        success, result = export_users_to_txt('users_export.txt')
+
+        if success:
+            # Faylni yuborish
+            with open(result, 'rb') as f:
+                await bot.send_document(
+                    cid, f,
+                    caption=f"📊 <b>Foydalanuvchilar eksporti</b>\n\n"
+                            f"👥 Jami: {users_count} ta\n"
+                            f"📁 Format: Telega.io uchun\n"
+                            f"✅ @foyda1ii_bot",
+                    parse_mode='HTML'
+                )
+            # Faylni o'chirish (xavfsizlik)
+            safe_remove(result)
+        else:
+            await bot.send_message(cid, f"❌ Eksport xatosi: {result}")
+
+    except Exception as e:
+        logger.error(f"Export users error: {e}")
+        await bot.send_message(cid, f"❌ Eksportda xatolik: {str(e)[:100]}")
 
 # ================= AUTO POST =================
 async def handle_autopost(m):
