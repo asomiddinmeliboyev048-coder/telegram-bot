@@ -436,21 +436,87 @@ async def handle_tts(m):
             return
 
         if voice_type == "venom":
-            await bot.edit_message_text("🎭 Venom ovoz effekti qo'llanilmoqda... (Sekin, chuqur, vahimali)", cid, msg.message_id)
-            # VENOM EFFEKT: Sekin (atempo=0.75), chuqur (pitch=-6), kuchli bass (g=15), cho'kkalar (echo)
-            cmd_venom = [
-                "ffmpeg", "-y", "-i", input_path,
-                "-af", "atempo=0.75,rubberband=pitch=-6,bass=g=15:f=110:w=0.7,aecho=0.9:0.85:120:0.6,volume=1.3",
-                "-ar", "44100", "-ac", "1", output_path
-            ]
+            await bot.edit_message_text("🎭 Venom effekt: Ikki qatlamli ovoz yaratilmoqda...", cid, msg.message_id)
+            
+            # VENOM EFFEKT: Ikki qatlamli (Layering), distortion, reverb
+            # Layer 1: Juda past (-10 semitones) va sekin (0.7x)
+            # Layer 2: Biroz balandroq (-5 semitones) va sekin (0.8x)
+            # Ularni aralashtirish va reverb qo'shish
+            
+            layer1_path = os.path.join(TEMP_DIR, f"{cid}_venom_layer1.mp3")
+            layer2_path = os.path.join(TEMP_DIR, f"{cid}_venom_layer2.mp3")
+            mixed_path = os.path.join(TEMP_DIR, f"{cid}_venom_mixed.mp3")
+            
             try:
                 loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(
-                    None, lambda: subprocess.run(cmd_venom, capture_output=True, text=True, timeout=45)
+                
+                # LAYER 1: Juda past, sekin, kuchli bass (asosiy "maxluq" qatlami)
+                await bot.edit_message_text("🎭 Venom: 1-qatlam (juda past ovoz)...", cid, msg.message_id)
+                cmd_layer1 = [
+                    "ffmpeg", "-y", "-i", input_path,
+                    "-af", "asetrate=44100*0.5,atempo=0.7,rubberband=pitch=-10,bass=g=20:f=80:w=1.0,acompressor=threshold=-20dB:ratio=4:attack=5:release=100,volume=1.4",
+                    "-ar", "44100", "-ac", "1", layer1_path
+                ]
+                result1 = await loop.run_in_executor(
+                    None, lambda: subprocess.run(cmd_layer1, capture_output=True, text=True, timeout=45)
                 )
-                file_to_send = output_path if (result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0) else input_path
-                if result.returncode != 0:
-                    logger.error(f"Venom ffmpeg error: {result.stderr}")
+                
+                # LAYER 2: Biroz balandroq, sekin (qo'shimcha tekstura)
+                await bot.edit_message_text("🎭 Venom: 2-qatlam (qo'shimcha tekstura)...", cid, msg.message_id)
+                cmd_layer2 = [
+                    "ffmpeg", "-y", "-i", input_path,
+                    "-af", "asetrate=44100*0.65,atempo=0.8,rubberband=pitch=-5,bass=g=12:f=100:w=0.8,volume=0.8",
+                    "-ar", "44100", "-ac", "1", layer2_path
+                ]
+                result2 = await loop.run_in_executor(
+                    None, lambda: subprocess.run(cmd_layer2, capture_output=True, text=True, timeout=45)
+                )
+                
+                # Ikkala qatlamni aralashtirish (mix with delay and reverb)
+                await bot.edit_message_text("🎭 Venom: Qatlamar aralashtirilmoqda + reverb...", cid, msg.message_id)
+                if (result1.returncode == 0 and os.path.exists(layer1_path) and 
+                    result2.returncode == 0 and os.path.exists(layer2_path)):
+                    
+                    # Mix both layers with amix filter + heavy reverb
+                    cmd_mix = [
+                        "ffmpeg", "-y",
+                        "-i", layer1_path,
+                        "-i", layer2_path,
+                        "-filter_complex",
+                        "[0:a]adelay=0|0[a0];[1:a]adelay=80|80,volume=0.6[a1];[a0][a1]amix=inputs=2:duration=longest:dropout_transition=3[amixed];[amixed]aecho=0.9:0.9:1000:0.5,aecho=0.8:0.8:500:0.3[reverb];[reverb]bass=g=8:f=120:w=0.5[out]",
+                        "-map", "[out]",
+                        "-ar", "44100", "-ac", "1", mixed_path
+                    ]
+                    result_mix = await loop.run_in_executor(
+                        None, lambda: subprocess.run(cmd_mix, capture_output=True, text=True, timeout=60)
+                    )
+                    
+                    if result_mix.returncode == 0 and os.path.exists(mixed_path) and os.path.getsize(mixed_path) > 0:
+                        file_to_send = mixed_path
+                        logger.info("✅ Venom two-layer effect created successfully")
+                    else:
+                        # Agar aralashtirish xato bersa, faqat layer1 ishlatamiz
+                        logger.warning(f"Venom mix failed, using layer1: {result_mix.stderr}")
+                        file_to_send = layer1_path
+                else:
+                    # Agar qatlam yaratish xato bersa, oddiy effekt ishlatamiz
+                    logger.warning("Venom layers failed, using simple effect")
+                    cmd_simple = [
+                        "ffmpeg", "-y", "-i", input_path,
+                        "-af", "asetrate=44100*0.55,atempo=0.75,rubberband=pitch=-8,bass=g=18:f=90:w=0.9,aecho=0.9:0.85:800:0.4,volume=1.3",
+                        "-ar", "44100", "-ac", "1", output_path
+                    ]
+                    result_simple = await loop.run_in_executor(
+                        None, lambda: subprocess.run(cmd_simple, capture_output=True, text=True, timeout=45)
+                    )
+                    file_to_send = output_path if (result_simple.returncode == 0 and os.path.exists(output_path)) else input_path
+                
+                # Vaqtinchalik fayllarni tozalash
+                safe_remove(layer1_path)
+                safe_remove(layer2_path)
+                if file_to_send != mixed_path:
+                    safe_remove(mixed_path)
+                    
             except Exception as e:
                 logger.error(f"Venom voice error: {e}")
                 file_to_send = input_path
@@ -492,6 +558,10 @@ async def handle_tts(m):
     finally:
         safe_remove(input_path)
         safe_remove(output_path)
+        # Venom effekti uchun vaqtinchalik fayllarni ham tozalash
+        safe_remove(os.path.join(TEMP_DIR, f"{cid}_venom_layer1.mp3"))
+        safe_remove(os.path.join(TEMP_DIR, f"{cid}_venom_layer2.mp3"))
+        safe_remove(os.path.join(TEMP_DIR, f"{cid}_venom_mixed.mp3"))
 
 # ================= BROADCAST =================
 async def handle_broadcast(m):
