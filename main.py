@@ -182,7 +182,7 @@ def require_subscription(handler):
 
 # ================= USERS =================
 def save_user(user_id, username=None, first_name=None, last_name=None):
-    """Foydalanuvchini MongoDB bazaga saqlash"""
+    """Foydalanuvchini SQLite bazaga saqlash"""
     try:
         print(f"💾 Foydalanuvchi saqlanmoqda: ID={user_id}, username={username}")
         result = add_user(user_id, username, first_name, last_name)
@@ -283,6 +283,25 @@ async def export_users_cmd(m):
             await bot.send_message(m.chat.id, "❌ Bu komanda faqat admin uchun!")
     except Exception as e:
         logger.error(f"Export users command error: {e}")
+
+@bot.message_handler(commands=['stat'])
+async def stat_cmd(m):
+    """Bot statistikasi - faqat admin uchun"""
+    try:
+        if m.from_user.id == OWNER_ID:
+            stats = get_user_stats()
+            stats_text = f"""📊 <b>Bot statistikasi:</b>
+
+👥 <b>Jami foydalanuvchilar:</b> {stats['total']}
+📅 <b>Bugun qo'shilgan:</b> {stats['today']}
+📆 <b>Hafta davomida:</b> {stats['week']}
+
+✅ @foyda1ii_bot"""
+            await bot.send_message(m.chat.id, stats_text, parse_mode='HTML')
+        else:
+            await bot.send_message(m.chat.id, "❌ Bu komanda faqat admin uchun!")
+    except Exception as e:
+        logger.error(f"Stat command error: {e}")
 
 AUTO_POST_TEXT = None
 

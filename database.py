@@ -1,91 +1,84 @@
 """
-MongoDB Atlas ma'lumotlar bazasi - Foydalanuvchilar bazasi uchun
-Render.com muhiti uchun moslangan - doimiy saqlash
+SQLite ma'lumotlar bazasi - Foydalanuvchilar bazasi uchun
+Render.com muhiti uchun moslangan - /tmp/users.db da saqlanadi
 """
 
+import sqlite3
 import os
-from datetime import datetime, timezone
-from pymongo import MongoClient, ASCENDING
-from pymongo.errors import DuplicateKeyError
+from datetime import datetime
 
-# MongoDB Atlas ulanish URI (Render'dagi MONGODB_URI environment variable dan olinadi)
-MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb+srv://asomiddinmeliboyev048_db_user:QsEe0c7kAg5JwzHX@cluster0.kjtun.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0')
-DB_NAME = 'matnovoz_bot'
-
-print(f"🔍 MONGODB_URI o'qilmoqda...")
-print(f"✅ MONGODB_URI mavjudmi: {bool(os.getenv('MONGODB_URI'))}")
-
-# Global client (bir marta ulanish)
-_client = None
-_db = None
+# SQLite bazaning joylashuvi - Render uchun /tmp (vaqtinchalik, lekin ishlaydi)
+# Agar persistents disk bo'lsa, uni o'zgartirish mumkin
+DATABASE_PATH = '/tmp/users.db'
 
 
-def get_db():
-    """MongoDB bazasiga ulanish (singleton pattern)"""
-    global _client, _db
-    if _client is None:
-        try:
-            print(f"🔌 MongoDB ga ulanishga urinish...")
-            _client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
-            # Server bilan bog'lanishni tekshirish
-            _client.admin.command('ping')
-            _db = _client[DB_NAME]
-            # Unique index yaratish - duplikat ID larni oldini olish uchun
-            _db.users.create_index([('user_id', ASCENDING)], unique=True)
-            print("✅ MongoDB Atlas ga ulanish muvaffaqiyatli!")
-            print(f"✅ Database: {DB_NAME}, Collection: users")
-        except Exception as e:
-            print(f"❌ MongoDB ulanish xatosi: {e}")
-            print(f"❌ TURI: {type(e).__name__}")
-            raise
-    return _db
+def get_connection():
+    """Bazaga ulanish yaratish"""
+    return sqlite3.connect(DATABASE_PATH)
+
+
+def init_db():
+    """Ma'lumotlar bazasini yaratish (agar mavjud bo'lmasa)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Foydalanuvchilar jadvalini yaratish
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Indeks yaratish - tezlik uchun
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_user_id ON users(user_id)
+    ''')
+    
+    conn.commit()
+    conn.close()
+    print(f"✅ SQLite ma'lumotlar bazasi tayyor! ({DATABASE_PATH})")
 
 
 def add_user(user_id, username=None, first_name=None, last_name=None):
     """
-    Foydalanuvchini MongoDB ga qo'shish
-    Agar mavjud bo'lsa, faqat last_active yangilanadi
+    Foydalanuvchini bazaga qo'shish
+    INSERT OR IGNORE - agar mavjud bo'lsa, qayta qo'shmaydi
     """
     try:
         print(f"📝 add_user chaqirildi: user_id={user_id}")
-        db = get_db()
-        users = db.users
+        conn = get_connection()
+        cursor = conn.cursor()
         
-        now = datetime.now(timezone.utc)
+        # INSERT OR IGNORE - duplikat ID larni oldini oladi
+        cursor.execute('''
+            INSERT OR IGNORE INTO users (user_id, username, first_name, last_name)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, username, first_name, last_name))
         
-        print(f"📝 MongoDB update_one ishga tushmoqda...")
-        
-        # upsert - agar mavjud bo'lsa update, yo'q bo'lsa insert
-        result = users.update_one(
-            {'user_id': user_id},
-            {
-                '$setOnInsert': {
-                    'user_id': user_id,
-                    'joined_date': now,
-                    'username': username,
-                    'first_name': first_name,
-                    'last_name': last_name
-                },
-                '$set': {
-                    'last_active': now
-                }
-            },
-            upsert=True
-        )
-        
-        print(f"📝 MongoDB natija: matched={result.matched_count}, modified={result.modified_count}, upserted_id={result.upserted_id}")
-        
-        if result.upserted_id:
-            print(f"✅ Yangi foydalanuvchi qo'shildi: {user_id}")
-        elif result.matched_count > 0:
+        # Agar foydalanuvchi allaqachon mavjud bo'lsa, faqat last_active ni yangilaymiz
+        if cursor.rowcount == 0:
+            cursor.execute('''
+                UPDATE users 
+                SET last_active = CURRENT_TIMESTAMP,
+                    username = COALESCE(?, username),
+                    first_name = COALESCE(?, first_name),
+                    last_name = COALESCE(?, last_name)
+                WHERE user_id = ?
+            ''', (username, first_name, last_name, user_id))
             print(f"✅ Foydalanuvchi yangilandi: {user_id}")
         else:
-            print(f"⚠️ MongoDB natija noma'lum: {result.raw_result}")
+            print(f"✅ Yangi foydalanuvchi qo'shildi: {user_id}")
         
+        conn.commit()
+        conn.close()
         return True
     except Exception as e:
         print(f"❌ add_user xatosi: {e}")
-        print(f"❌ Xato turi: {type(e).__name__}")
         import traceback
         traceback.print_exc()
         return False
@@ -94,12 +87,15 @@ def add_user(user_id, username=None, first_name=None, last_name=None):
 def get_all_users():
     """Barcha foydalanuvchilarning ID larini olish"""
     try:
-        db = get_db()
-        users = db.users
+        conn = get_connection()
+        cursor = conn.cursor()
         
-        # joined_date bo'yicha saralash (eng yangilar birinchi)
-        cursor = users.find({}, {'user_id': 1}).sort('joined_date', -1)
-        return [doc['user_id'] for doc in cursor]
+        cursor.execute('SELECT user_id FROM users ORDER BY joined_date DESC')
+        users = cursor.fetchall()
+        
+        conn.close()
+        # [(123,), (456,)] -> [123, 456]
+        return [user[0] for user in users]
     except Exception as e:
         print(f"❌ get_all_users xatosi: {e}")
         return []
@@ -108,8 +104,15 @@ def get_all_users():
 def get_users_count():
     """Foydalanuvchilar sonini olish"""
     try:
-        db = get_db()
-        return db.users.count_documents({})
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT COUNT(*) FROM users')
+        count = cursor.fetchone()[0]
+        
+        conn.close()
+        print(f"📊 Foydalanuvchilar soni: {count}")
+        return count
     except Exception as e:
         print(f"❌ get_users_count xatosi: {e}")
         return 0
@@ -126,35 +129,46 @@ def export_users_to_txt(filename='users_export.txt'):
         if not users:
             return False, "Bazada foydalanuvchilar yo'q"
         
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        filepath = os.path.join(base_dir, filename)
+        # /tmp da saqlash (Render uchun)
+        filepath = os.path.join('/tmp', filename)
         
         with open(filepath, 'w', encoding='utf-8') as f:
             for user_id in users:
                 f.write(f"{user_id}\n")
         
+        print(f"✅ Eksport tayyor: {filepath} ({len(users)} ta foydalanuvchi)")
         return True, filepath
     except Exception as e:
+        print(f"❌ export_users_to_txt xatosi: {e}")
         return False, str(e)
 
 
 def get_user_stats():
     """Batafsil statistikani olish"""
     try:
-        db = get_db()
-        users = db.users
+        conn = get_connection()
+        cursor = conn.cursor()
         
         # Jami foydalanuvchilar
-        total = users.count_documents({})
+        cursor.execute('SELECT COUNT(*) FROM users')
+        total = cursor.fetchone()[0]
         
-        # Bugun qo'shilganlar (UTC vaqt)
-        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        today_count = users.count_documents({'joined_date': {'$gte': today_start}})
+        # Bugun qo'shilganlar
+        today = datetime.now().strftime('%Y-%m-%d')
+        cursor.execute('''
+            SELECT COUNT(*) FROM users 
+            WHERE date(joined_date) = date('now')
+        ''')
+        today_count = cursor.fetchone()[0]
         
-        # Bu hafta qo'shilganlar (so'nggi 7 kun)
-        from datetime import timedelta
-        week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-        week_count = users.count_documents({'joined_date': {'$gte': week_ago}})
+        # Bu hafta qo'shilganlar
+        cursor.execute('''
+            SELECT COUNT(*) FROM users 
+            WHERE joined_date >= datetime('now', '-7 days')
+        ''')
+        week_count = cursor.fetchone()[0]
+        
+        conn.close()
         
         return {
             'total': total,
@@ -166,12 +180,6 @@ def get_user_stats():
         return {'total': 0, 'today': 0, 'week': 0}
 
 
-# Dastur ishga tushganda ulanishni tekshirish
-try:
-    print("🚀 Database initialization boshlandi...")
-    get_db()
-    print("🚀 Database initialization yakunlandi!")
-except Exception as e:
-    print(f"⚠️ Database initialization error: {e}")
-    import traceback
-    traceback.print_exc()
+# Baza birinchi marta yuklanganda avtomatik yaratish
+print("🚀 SQLite database initialization...")
+init_db()
