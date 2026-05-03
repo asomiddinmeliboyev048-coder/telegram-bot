@@ -769,24 +769,33 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
             await bot.delete_message(cid, msg_id)
             return
 
-        # YouTube blokidan o'tish uchun headers qo'shish
+        # YouTube blokidan o'tish uchun headers qo'shish (real brauzer User-Agent)
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Referer': 'https://www.google.com/',
             'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
         }
         
         # Random client tanlash (ios yoki android) - YouTube blokidan o'tish uchun
         import random
         client_type = random.choice(['ios', 'android'])
         
+        # Cookies fayli yo'lini aniqlash (main.py telegram-bot/ ichida, cookies.txt esa root'da)
+        BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cookies_path = os.path.join(BASE_DIR, 'cookies.txt')
+        
         # Optimized yt_dlp settings for fast download with YouTube bypass
         # PoToken va Visitor Data - YouTube blokidan o'tish uchun
-        # cookies.txt faylini ishlatish (agar mavjud bo'lsa):
-        # 1. Browser dan cookies.txt export qiling
-        # 2. Loyiha rootiga 'cookies.txt' nomi bilan saqlang
-        # 3. Quyidagi 'cookiefile' parametrini yoqing:
-        # 'cookiefile': 'cookies.txt',
+        # Cookies faylini tekshirish
+        cookies_exists = os.path.exists(cookies_path)
+        if not cookies_exists:
+            logger.warning(f"⚠️ cookies.txt fayli topilmadi: {cookies_path}")
+        
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(TEMP_DIR, f'{cid}_%(title)s.%(ext)s'),
@@ -808,7 +817,6 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
             'nocheckcertificate': True,  # SSL sertifikatini tekshirmaslik
             'prefer_insecure': True,  # HTTP ustidan HTTPS afzal qilish
             'youtube_include_dash_manifest': False,  # DASH manifestni o'tkazib yuborish
-            'cookiefile': 'www.youtube.com_cookies.txt',  # Cookie fayli - YouTube blokidan o'tish uchun
             'extractor_args': {
                 'youtube': {
                     'player_client': client_type,  # Tasodifiy client (ios/android)
@@ -816,6 +824,17 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
                 }
             },
         }
+        
+        # Agar cookies.txt mavjud bo'lsa, qo'shish
+        if cookies_exists:
+            ydl_opts['cookiefile'] = cookies_path
+            logger.info(f"✅ Cookies fayli ulanmoqda: {cookies_path}")
+        else:
+            # Cookies yo'q bo'lsa, foydalanuvchiga texnik sozlash xabari
+            await bot.edit_message_text(
+                "⚙️ Serverda texnik sozlash ketmoqda...\n⏳ Iltimos, biroz kuting...",
+                cid, msg_id
+            )
 
         # Download with 60 second timeout
         info = None
