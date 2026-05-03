@@ -182,10 +182,18 @@ def require_subscription(handler):
 
 # ================= USERS =================
 def save_user(user_id, username=None, first_name=None, last_name=None):
-    """Foydalanuvchini SQLite bazaga saqlash"""
+    """Foydalanuvchini MongoDB bazaga saqlash"""
     try:
-        add_user(user_id, username, first_name, last_name)
+        print(f"💾 Foydalanuvchi saqlanmoqda: ID={user_id}, username={username}")
+        result = add_user(user_id, username, first_name, last_name)
+        if result:
+            print(f"✅ Foydalanuvchi saqlandi: {user_id}")
+        else:
+            print(f"❌ Foydalanuvchi saqlanmadi (add_user False qaytardi): {user_id}")
     except Exception as e:
+        print(f"❌ save_user xatosi {user_id}: {e}")
+        import traceback
+        traceback.print_exc()
         logger.error(f"Error saving user {user_id}: {e}")
 
 def get_users():

@@ -8,9 +8,12 @@ from datetime import datetime, timezone
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError
 
-# MongoDB Atlas ulanish URI (xavfsiz saqlash uchun .env dan olish tavsiya etiladi)
-MONGO_URI = os.getenv('MONGO_URI', 'mongodb+srv://asomiddinmeliboyev048_db_user:QsEe0c7kAg5JwzHX@cluster0.kjtun.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0')
+# MongoDB Atlas ulanish URI (Render'dagi MONGODB_URI environment variable dan olinadi)
+MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb+srv://asomiddinmeliboyev048_db_user:QsEe0c7kAg5JwzHX@cluster0.kjtun.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0')
 DB_NAME = 'matnovoz_bot'
+
+print(f"🔍 MONGODB_URI o'qilmoqda...")
+print(f"✅ MONGODB_URI mavjudmi: {bool(os.getenv('MONGODB_URI'))}")
 
 # Global client (bir marta ulanish)
 _client = None
@@ -22,13 +25,18 @@ def get_db():
     global _client, _db
     if _client is None:
         try:
-            _client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+            print(f"🔌 MongoDB ga ulanishga urinish...")
+            _client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+            # Server bilan bog'lanishni tekshirish
+            _client.admin.command('ping')
             _db = _client[DB_NAME]
             # Unique index yaratish - duplikat ID larni oldini olish uchun
             _db.users.create_index([('user_id', ASCENDING)], unique=True)
             print("✅ MongoDB Atlas ga ulanish muvaffaqiyatli!")
+            print(f"✅ Database: {DB_NAME}, Collection: users")
         except Exception as e:
             print(f"❌ MongoDB ulanish xatosi: {e}")
+            print(f"❌ TURI: {type(e).__name__}")
             raise
     return _db
 
@@ -39,10 +47,13 @@ def add_user(user_id, username=None, first_name=None, last_name=None):
     Agar mavjud bo'lsa, faqat last_active yangilanadi
     """
     try:
+        print(f"📝 add_user chaqirildi: user_id={user_id}")
         db = get_db()
         users = db.users
         
         now = datetime.now(timezone.utc)
+        
+        print(f"📝 MongoDB update_one ishga tushmoqda...")
         
         # upsert - agar mavjud bo'lsa update, yo'q bo'lsa insert
         result = users.update_one(
@@ -62,14 +73,21 @@ def add_user(user_id, username=None, first_name=None, last_name=None):
             upsert=True
         )
         
+        print(f"📝 MongoDB natija: matched={result.matched_count}, modified={result.modified_count}, upserted_id={result.upserted_id}")
+        
         if result.upserted_id:
             print(f"✅ Yangi foydalanuvchi qo'shildi: {user_id}")
-        else:
+        elif result.matched_count > 0:
             print(f"✅ Foydalanuvchi yangilandi: {user_id}")
+        else:
+            print(f"⚠️ MongoDB natija noma'lum: {result.raw_result}")
         
         return True
     except Exception as e:
         print(f"❌ add_user xatosi: {e}")
+        print(f"❌ Xato turi: {type(e).__name__}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -150,6 +168,10 @@ def get_user_stats():
 
 # Dastur ishga tushganda ulanishni tekshirish
 try:
+    print("🚀 Database initialization boshlandi...")
     get_db()
+    print("🚀 Database initialization yakunlandi!")
 except Exception as e:
     print(f"⚠️ Database initialization error: {e}")
+    import traceback
+    traceback.print_exc()
