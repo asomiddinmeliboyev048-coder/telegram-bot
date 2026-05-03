@@ -200,7 +200,7 @@ def get_users():
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     kb.add("🎤 Text → Voice", "🎬 Video → MP3")
-    kb.add("🎧 Search Music", "🔵 Circle Video")
+    kb.add("🔵 Circle Video")
     return kb
 
 def voice_menu():
@@ -305,6 +305,20 @@ async def text_handler(m):
         return
 
     try:
+        # Havola (link) tekshiruvi
+        if txt.startswith(('http://', 'https://', 'www.', 'youtube.com', 'youtu.be')):
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("🎬 Video → MP3", callback_data="show_video_mp3"))
+            await bot.send_message(
+                cid,
+                "⚠️ <b>Eslatma:</b> Hurmatli foydalanuvchi, bizning botimiz havoladan to'g'ridan-to'g'ri video yuklab bermaydi. "
+                "Botimiz havoladagi videoni faqat audio (MP3) shaklida taqdim eta oladi. "
+                "Buning uchun pastdagi tegishli tugmani bosing.",
+                parse_mode='HTML',
+                reply_markup=kb
+            )
+            return
+
         # Orqaga tugmalari
         if txt in ["⬅️ Orqaga", "🔙 Orqaga"]:
             user_state[cid] = None
@@ -374,10 +388,6 @@ async def text_handler(m):
             await bot.send_message(cid, "🎥 Video yuboring (MP3 ga aylantiraman):")
             return
 
-        if txt == "🎧 Search Music":
-            user_state[cid] = "music"
-            await bot.send_message(cid, "🎵 Qo'shiq nomi yoki ijrochi yozing:\n(Masalan: 'Eminem Lose Yourself')")
-            return
 
         if txt == "🔵 Circle Video":
             user_state[cid] = "circle"
@@ -426,18 +436,21 @@ async def handle_tts(m):
             return
 
         if voice_type == "venom":
-            await bot.edit_message_text("🎭 Venom ovoz effekti qo'llanilmoqda...", cid, msg.message_id)
+            await bot.edit_message_text("🎭 Venom ovoz effekti qo'llanilmoqda... (Sekin, chuqur, vahimali)", cid, msg.message_id)
+            # VENOM EFFEKT: Sekin (atempo=0.75), chuqur (pitch=-6), kuchli bass (g=15), cho'kkalar (echo)
             cmd_venom = [
                 "ffmpeg", "-y", "-i", input_path,
-                "-af", "bass=g=12,asetrate=44100*0.5,atempo=2.0,aecho=0.8:0.88:60:0.4",
+                "-af", "atempo=0.75,rubberband=pitch=-6,bass=g=15:f=110:w=0.7,aecho=0.9:0.85:120:0.6,volume=1.3",
                 "-ar", "44100", "-ac", "1", output_path
             ]
             try:
                 loop = asyncio.get_event_loop()
                 result = await loop.run_in_executor(
-                    None, lambda: subprocess.run(cmd_venom, capture_output=True, text=True, timeout=30)
+                    None, lambda: subprocess.run(cmd_venom, capture_output=True, text=True, timeout=45)
                 )
                 file_to_send = output_path if (result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0) else input_path
+                if result.returncode != 0:
+                    logger.error(f"Venom ffmpeg error: {result.stderr}")
             except Exception as e:
                 logger.error(f"Venom voice error: {e}")
                 file_to_send = input_path
@@ -785,16 +798,28 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
         import random
         client_type = random.choice(['ios', 'android'])
         
-        # Cookies fayli yo'lini aniqlash (main.py telegram-bot/ ichida, cookies.txt esa root'da)
-        BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        cookies_path = os.path.join(BASE_DIR, 'cookies.txt')
+        # Cookies fayli yo'lini aniqlash (Render uchun os.getcwd() ishlatamiz)
+        # Renderda loyiha root'idan ishga tushadi, shuning uchun os.getcwd() to'g'ri yo'lni beradi
+        cookies_path = os.path.join(os.getcwd(), 'cookies.txt')
+        
+        # Loglash uchun qo'shimcha yo'llarni ham tekshiramiz
+        alt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'cookies.txt')
+        
+        logger.info(f"🔍 Cookies fayli qidirilmoqda: {cookies_path}")
+        logger.info(f"🔍 CWD: {os.getcwd()}")
+        logger.info(f"🔍 Alt path: {alt_path}")
         
         # Optimized yt_dlp settings for fast download with YouTube bypass
-        # PoToken va Visitor Data - YouTube blokidan o'tish uchun
         # Cookies faylini tekshirish
         cookies_exists = os.path.exists(cookies_path)
         if not cookies_exists:
-            logger.warning(f"⚠️ cookies.txt fayli topilmadi: {cookies_path}")
+            # Asosiy yo'lda topilmasa, alternativ yo'lni tekshirish
+            if os.path.exists(alt_path):
+                cookies_path = alt_path
+                cookies_exists = True
+                logger.info(f"✅ Cookies fayli alternativ yo'lda topildi: {alt_path}")
+            else:
+                logger.warning(f"⚠️ cookies.txt fayli topilmadi: {cookies_path} yoki {alt_path}")
         
         ydl_opts = {
             'format': 'bestaudio/best',
@@ -852,9 +877,18 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
             return
         except Exception as e:
             error_detail = str(e)
+            
+            # DETAIL loglash - Render loglarida ko'rish uchun
+            logger.error(f"❌ YUKLASH XATOSI (TO'LIQ): {error_detail}")
+            logger.error(f"❌ Xato turi: {type(e).__name__}")
+            logger.error(f"❌ URL: {url}")
+            logger.error(f"❌ Cookies mavjud: {cookies_exists}")
+            if cookies_exists:
+                logger.error(f"❌ Cookies yo'li: {cookies_path}")
+            
             # 'Sign in to confirm' va boshqa YouTube blokirovka xatolarini aniqlash
             error_lower = error_detail.lower()
-            if any(kw in error_lower for kw in ['sign in', 'confirm', 'bot detected', 'unavailable', 'blocked', 'forbidden', 'access denied']):
+            if any(kw in error_lower for kw in ['sign in', 'confirm', 'bot detected', 'unavailable', 'blocked', 'forbidden', 'access denied', 'the page needs to be reloaded']):
                 error_msg = "❌ YouTube blokladi, iltimos boshqa qo'shiqni sinab ko'ring"
             else:
                 error_msg = f"❌ Yuklab olishda xatolik:\n<code>{error_detail[:400]}</code>"

@@ -1,77 +1,72 @@
 """
-SQLite ma'lumotlar bazasi - Foydalanuvchilar bazasi uchun
-Render.com muhiti uchun moslangan - loyiha ichida saqlanadi
+MongoDB Atlas ma'lumotlar bazasi - Foydalanuvchilar bazasi uchun
+Render.com muhiti uchun moslangan - doimiy saqlash
 """
 
-import sqlite3
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+from pymongo import MongoClient, ASCENDING
+from pymongo.errors import DuplicateKeyError
 
-# Bazaning joylashuvi - loyiha ichida (Render.com uchun)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATABASE_PATH = os.path.join(BASE_DIR, 'bot_database.db')
+# MongoDB Atlas ulanish URI (xavfsiz saqlash uchun .env dan olish tavsiya etiladi)
+MONGO_URI = os.getenv('MONGO_URI', 'mongodb+srv://asomiddinmeliboyev048_db_user:QsEe0c7kAg5JwzHX@cluster0.kjtun.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0')
+DB_NAME = 'matnovoz_bot'
+
+# Global client (bir marta ulanish)
+_client = None
+_db = None
 
 
-def get_connection():
-    """Bazaga ulanish yaratish"""
-    return sqlite3.connect(DATABASE_PATH)
-
-
-def init_db():
-    """Ma'lumotlar bazasini yaratish (agar mavjud bo'lmasa)"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    # Foydalanuvchilar jadvalini yaratish
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Indeks yaratish - tezlik uchun
-    cursor.execute('''
-        CREATE INDEX IF NOT EXISTS idx_user_id ON users(user_id)
-    ''')
-    
-    conn.commit()
-    conn.close()
-    print("✅ Ma'lumotlar bazasi tayyor!")
+def get_db():
+    """MongoDB bazasiga ulanish (singleton pattern)"""
+    global _client, _db
+    if _client is None:
+        try:
+            _client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+            _db = _client[DB_NAME]
+            # Unique index yaratish - duplikat ID larni oldini olish uchun
+            _db.users.create_index([('user_id', ASCENDING)], unique=True)
+            print("✅ MongoDB Atlas ga ulanish muvaffaqiyatli!")
+        except Exception as e:
+            print(f"❌ MongoDB ulanish xatosi: {e}")
+            raise
+    return _db
 
 
 def add_user(user_id, username=None, first_name=None, last_name=None):
     """
-    Foydalanuvchini bazaga qo'shish
-    INSERT OR IGNORE - agar mavjud bo'lsa, qayta qo'shmaydi
+    Foydalanuvchini MongoDB ga qo'shish
+    Agar mavjud bo'lsa, faqat last_active yangilanadi
     """
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
+        db = get_db()
+        users = db.users
         
-        # INSERT OR IGNORE - duplikat ID larni oldini oladi
-        cursor.execute('''
-            INSERT OR IGNORE INTO users (user_id, username, first_name, last_name)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, username, first_name, last_name))
+        now = datetime.now(timezone.utc)
         
-        # Agar foydalanuvchi allaqachon mavjud bo'lsa, faqat last_active ni yangilaymiz
-        if cursor.rowcount == 0:
-            cursor.execute('''
-                UPDATE users 
-                SET last_active = CURRENT_TIMESTAMP,
-                    username = COALESCE(?, username),
-                    first_name = COALESCE(?, first_name),
-                    last_name = COALESCE(?, last_name)
-                WHERE user_id = ?
-            ''', (username, first_name, last_name, user_id))
+        # upsert - agar mavjud bo'lsa update, yo'q bo'lsa insert
+        result = users.update_one(
+            {'user_id': user_id},
+            {
+                '$setOnInsert': {
+                    'user_id': user_id,
+                    'joined_date': now,
+                    'username': username,
+                    'first_name': first_name,
+                    'last_name': last_name
+                },
+                '$set': {
+                    'last_active': now
+                }
+            },
+            upsert=True
+        )
         
-        conn.commit()
-        conn.close()
+        if result.upserted_id:
+            print(f"✅ Yangi foydalanuvchi qo'shildi: {user_id}")
+        else:
+            print(f"✅ Foydalanuvchi yangilandi: {user_id}")
+        
         return True
     except Exception as e:
         print(f"❌ add_user xatosi: {e}")
@@ -81,15 +76,12 @@ def add_user(user_id, username=None, first_name=None, last_name=None):
 def get_all_users():
     """Barcha foydalanuvchilarning ID larini olish"""
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
+        db = get_db()
+        users = db.users
         
-        cursor.execute('SELECT user_id FROM users ORDER BY joined_date DESC')
-        users = cursor.fetchall()
-        
-        conn.close()
-        # [(123,), (456,)] -> [123, 456]
-        return [user[0] for user in users]
+        # joined_date bo'yicha saralash (eng yangilar birinchi)
+        cursor = users.find({}, {'user_id': 1}).sort('joined_date', -1)
+        return [doc['user_id'] for doc in cursor]
     except Exception as e:
         print(f"❌ get_all_users xatosi: {e}")
         return []
@@ -98,14 +90,8 @@ def get_all_users():
 def get_users_count():
     """Foydalanuvchilar sonini olish"""
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT COUNT(*) FROM users')
-        count = cursor.fetchone()[0]
-        
-        conn.close()
-        return count
+        db = get_db()
+        return db.users.count_documents({})
     except Exception as e:
         print(f"❌ get_users_count xatosi: {e}")
         return 0
@@ -122,7 +108,8 @@ def export_users_to_txt(filename='users_export.txt'):
         if not users:
             return False, "Bazada foydalanuvchilar yo'q"
         
-        filepath = os.path.join(BASE_DIR, filename)
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        filepath = os.path.join(base_dir, filename)
         
         with open(filepath, 'w', encoding='utf-8') as f:
             for user_id in users:
@@ -136,29 +123,20 @@ def export_users_to_txt(filename='users_export.txt'):
 def get_user_stats():
     """Batafsil statistikani olish"""
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
+        db = get_db()
+        users = db.users
         
         # Jami foydalanuvchilar
-        cursor.execute('SELECT COUNT(*) FROM users')
-        total = cursor.fetchone()[0]
+        total = users.count_documents({})
         
-        # Bugun qo'shilganlar
-        today = datetime.now().strftime('%Y-%m-%d')
-        cursor.execute('''
-            SELECT COUNT(*) FROM users 
-            WHERE date(joined_date) = date('now')
-        ''')
-        today_count = cursor.fetchone()[0]
+        # Bugun qo'shilganlar (UTC vaqt)
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_count = users.count_documents({'joined_date': {'$gte': today_start}})
         
-        # Bu hafta qo'shilganlar
-        cursor.execute('''
-            SELECT COUNT(*) FROM users 
-            WHERE joined_date >= date('now', '-7 days')
-        ''')
-        week_count = cursor.fetchone()[0]
-        
-        conn.close()
+        # Bu hafta qo'shilganlar (so'nggi 7 kun)
+        from datetime import timedelta
+        week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        week_count = users.count_documents({'joined_date': {'$gte': week_ago}})
         
         return {
             'total': total,
@@ -170,5 +148,8 @@ def get_user_stats():
         return {'total': 0, 'today': 0, 'week': 0}
 
 
-# Baza birinchi marta yuklanganda avtomatik yaratish
-init_db()
+# Dastur ishga tushganda ulanishni tekshirish
+try:
+    get_db()
+except Exception as e:
+    print(f"⚠️ Database initialization error: {e}")
