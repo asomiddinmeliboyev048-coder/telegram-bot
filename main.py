@@ -522,20 +522,22 @@ async def handle_tts(m):
                 layer1_audio = pydub.from_mp3(layer1_path)
                 layer2_audio = pydub.from_mp3(layer2_path)
                 
-                # Layer 2 ni 100ms kechiktirish (echo effekti uchun)
-                silence = pydub.silent(duration=100)
+                # Layer 2 ni 50ms kechiktirish (echo effekti uchun) - kamaytirildi
+                silence = pydub.silent(duration=50)
                 layer2_with_delay = silence + layer2_audio
                 
-                # Aralashtirish (mix)
+                # Aralashtirish (mix) - Layer 2 ovozini pastroq aralashtirish (15% mix)
+                layer2_with_delay = layer2_with_delay - 12  # -12dB = ~15% hajmda
                 mixed = layer1_audio.overlay(layer2_with_delay, position=0)
                 
-                # Reverb effekti (oddiy echo)
-                # 200ms kechikish bilan takrorlash
-                echo1 = mixed - 6  # -6dB
-                echo_silence = pydub.silent(duration=200)
+                # Reverb effekti (oddiy echo) - JUDA PAST (10% mix)
+                # 80ms kechikish bilan takrorlash (200ms dan 80ms ga kamaytirildi)
+                echo1 = mixed - 20  # -20dB = ~10% hajmda (juda past)
+                echo_silence = pydub.silent(duration=80)
                 echo1 = echo_silence + echo1
                 
-                mixed = mixed.overlay(echo1, position=0)
+                # Faqat 10% echo aralashtirish - nutq aniq eshitilsin
+                mixed = mixed.overlay(echo1, position=0, gain_during_overlay=0)
                 
                 # Bass boost (low shelf)
                 mixed = mixed.low_pass_filter(600)
