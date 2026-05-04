@@ -9,9 +9,8 @@ edge-tts>=6.1.9
 # Environment
 python-dotenv>=1.0.0
 
-# Database - MongoDB Atlas
-pymongo[srv]>=4.6.0
-dnspython>=2.4.0
+# Audio processing (Venom voice effects with pydub)
+pydub>=0.25.1
 
 # Optional: Spotify (lazy loaded)
 spotipy>=2.3.0
