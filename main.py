@@ -183,19 +183,33 @@ def require_subscription(handler):
 
 # ================= USERS =================
 def save_user(user_id, username=None, first_name=None, last_name=None):
-    """Foydalanuvchini SQLite bazaga saqlash"""
-    try:
-        print(f"💾 Foydalanuvchi saqlanmoqda: ID={user_id}, username={username}")
-        result = add_user(user_id, username, first_name, last_name)
-        if result:
-            print(f"✅ Foydalanuvchi saqlandi: {user_id}")
-        else:
-            print(f"❌ Foydalanuvchi saqlanmadi (add_user False qaytardi): {user_id}")
-    except Exception as e:
-        print(f"❌ save_user xatosi {user_id}: {e}")
-        import traceback
-        traceback.print_exc()
-        logger.error(f"Error saving user {user_id}: {e}")
+    """Foydalanuvchini SQLite bazaga saqlash (retry bilan)"""
+    max_retries = 3
+    retry_delay = 1
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"💾 Foydalanuvchi saqlanmoqda: ID={user_id}, username={username} (urinish {attempt + 1}/{max_retries})")
+            result = add_user(user_id, username, first_name, last_name)
+            if result:
+                print(f"✅ Foydalanuvchi saqlandi: {user_id}")
+                return True
+            else:
+                print(f"⚠️ Foydalanuvchi saqlanmadi: {user_id}")
+                return False
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries - 1:
+                print(f"⚠️ Baza band (locked), {retry_delay}s dan keyin qayta urinish...")
+                time.sleep(retry_delay)
+                continue
+            else:
+                logger.error(f"Error saving user {user_id} (attempt {attempt + 1}): {e}")
+                return False
+        except Exception as e:
+            logger.error(f"Error saving user {user_id}: {e}")
+            return False
+    
+    return False
 
 def get_users():
     """Barcha foydalanuvchilarning ID larini olish (SQLite)"""
@@ -646,28 +660,17 @@ async def handle_export_users(m):
 
         await bot.send_message(cid, f"📤 {users_count} ta foydalanuvchi eksport qilinmoqda...")
 
-        # Eksport qilish
-        success, result = export_users_to_txt('users_export.txt')
-
         if success:
-            # Faylni yuborish
             with open(result, 'rb') as f:
-                await bot.send_document(
-                    cid, f,
-                    caption=f"📊 <b>Foydalanuvchilar eksporti</b>\n\n"
-                            f"👥 Jami: {users_count} ta\n"
-                            f"📁 Format: Telega.io uchun\n"
-                            f"✅ @foyda1ii_bot",
-                    parse_mode='HTML'
-                )
-            # Faylni o'chirish (xavfsizlik)
-            safe_remove(result)
+                await bot.send_document(cid, f, caption="� Foydalanuvchilar ro'yxati (Telega.io uchun)")
+            os.remove(result)
+            logger.info(f"Users exported by admin {m.from_user.id}")
         else:
-            await bot.send_message(cid, f"❌ Eksport xatosi: {result}")
-
+            # Agar baza bo'sh bo'lsa yoki xato bo'lsa
+            await bot.send_message(cid, "ℹ️ Hozircha foydalanuvchilar yo'q yoki bazada ma'lumot topilmadi.")
     except Exception as e:
         logger.error(f"Export users error: {e}")
-        await bot.send_message(cid, f"❌ Eksportda xatolik: {str(e)[:100]}")
+        await bot.send_message(m.chat.id, "ℹ️ Eksport xatosi. Bazada foydalanuvchilar yo'q bo'lishi mumkin.")
 
 # ================= AUTO POST =================
 async def handle_autopost(m):

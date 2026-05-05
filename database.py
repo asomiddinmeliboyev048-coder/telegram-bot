@@ -5,6 +5,7 @@ Render.com muhiti uchun moslangan - /tmp/users.db da saqlanadi
 
 import sqlite3
 import os
+import time
 from datetime import datetime
 
 # SQLite bazaning joylashuvi - Render uchun /tmp (vaqtinchalik, lekin ishlaydi)
@@ -15,6 +16,66 @@ DATABASE_PATH = '/tmp/users.db'
 def get_connection():
     """Bazaga ulanish yaratish"""
     return sqlite3.connect(DATABASE_PATH)
+
+
+def ensure_table_exists():
+    """Jadval mavjudligini tekshirish va yo'q bo'lsa yaratish"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+        if not cursor.fetchone():
+            print("Users jadvali topilmadi, yaratilmoqda...")
+            cursor.execute('''
+                CREATE TABLE users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('CREATE INDEX idx_user_id ON users(user_id)')
+            conn.commit()
+            print("Users jadvali yaratildi!")
+        
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Jadval tekshiruvi xatosi: {e}")
+        return False
+
+
+def ensure_table_exists():
+    """Jadval mavjudligini tekshirish va yo'q bo'lsa yaratish"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+        if not cursor.fetchone():
+            print("🔄 Users jadvali topilmadi, yaratilmoqda...")
+            cursor.execute('''
+                CREATE TABLE users (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('CREATE INDEX idx_user_id ON users(user_id)')
+            conn.commit()
+            print("✅ Users jadvali yaratildi!")
+        
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"❌ Jadval tekshiruvi/yaratish xatosi: {e}")
+        return False
 
 
 def init_db():
@@ -48,40 +109,62 @@ def add_user(user_id, username=None, first_name=None, last_name=None):
     """
     Foydalanuvchini bazaga qo'shish
     INSERT OR IGNORE - agar mavjud bo'lsa, qayta qo'shmaydi
+    Retry logic bilan - baza band bo'lsa qayta urinish
     """
-    try:
-        print(f"📝 add_user chaqirildi: user_id={user_id}")
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # INSERT OR IGNORE - duplikat ID larni oldini oladi
-        cursor.execute('''
-            INSERT OR IGNORE INTO users (user_id, username, first_name, last_name)
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, username, first_name, last_name))
-        
-        # Agar foydalanuvchi allaqachon mavjud bo'lsa, faqat last_active ni yangilaymiz
-        if cursor.rowcount == 0:
+    max_retries = 3
+    retry_delay = 1
+    
+    for attempt in range(max_retries):
+        try:
+            if attempt == 0:
+                print(f"📝 add_user chaqirildi: user_id={user_id}")
+            
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            # INSERT OR IGNORE - duplikat ID larni oldini oladi
             cursor.execute('''
-                UPDATE users 
-                SET last_active = CURRENT_TIMESTAMP,
-                    username = COALESCE(?, username),
-                    first_name = COALESCE(?, first_name),
-                    last_name = COALESCE(?, last_name)
-                WHERE user_id = ?
-            ''', (username, first_name, last_name, user_id))
-            print(f"✅ Foydalanuvchi yangilandi: {user_id}")
-        else:
-            print(f"✅ Yangi foydalanuvchi qo'shildi: {user_id}")
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"❌ add_user xatosi: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+                INSERT OR IGNORE INTO users (user_id, username, first_name, last_name)
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, username, first_name, last_name))
+            
+            is_new_user = cursor.rowcount > 0
+            
+            # Agar foydalanuvchi allaqachon mavjud bo'lsa, faqat last_active ni yangilaymiz
+            if not is_new_user:
+                cursor.execute('''
+                    UPDATE users 
+                    SET last_active = CURRENT_TIMESTAMP,
+                        username = COALESCE(?, username),
+                        first_name = COALESCE(?, first_name),
+                        last_name = COALESCE(?, last_name)
+                    WHERE user_id = ?
+                ''', (username, first_name, last_name, user_id))
+                # Faqat yangi foydalanuvchilar uchun log
+                pass  # Yangilanishni log qilmaymiz (ko'p boladi)
+            else:
+                # YANGI FOYDALANUVCHI - Render loglarini ko'rsatish uchun
+                print(f"✅ YANGI FOYDALANUVCHI QO'SHILDI: ID={user_id}, username=@{username if username else 'N/A'}")
+            
+            conn.commit()
+            conn.close()
+            return True
+            
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries - 1:
+                print(f"⚠️ Baza band (locked), {retry_delay}s dan keyin qayta urinish... ({attempt + 1}/{max_retries})")
+                time.sleep(retry_delay)
+                continue
+            else:
+                print(f"❌ add_user xatosi (attempt {attempt + 1}): {e}")
+                return False
+        except Exception as e:
+            print(f"❌ add_user xatosi: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    return False
 
 
 def get_all_users():
@@ -182,4 +265,13 @@ def get_user_stats():
 
 # Baza birinchi marta yuklanganda avtomatik yaratish
 print("🚀 SQLite database initialization...")
-init_db()
+try:
+    # Avval jadval mavjudligini tekshirish
+    if not ensure_table_exists():
+        # Agar tekshiruv xato bersa, to'liq yaratishga urinib ko'ramiz
+        init_db()
+    print("✅ Database initialization muvaffaqiyatli!")
+except Exception as e:
+    print(f"❌ Database initialization xatosi: {e}")
+    import traceback
+    traceback.print_exc()
