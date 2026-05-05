@@ -651,6 +651,7 @@ async def handle_broadcast(m):
 async def handle_export_users(m):
     """Foydalanuvchilarni .txt faylga eksport qilish (Telega.io format)"""
     cid = m.chat.id
+    export_path = None
     try:
         # Baza bo'shmi tekshirish
         users_count = get_users_count()
@@ -659,18 +660,52 @@ async def handle_export_users(m):
             return
 
         await bot.send_message(cid, f"📤 {users_count} ta foydalanuvchi eksport qilinmoqda...")
-
+        
+        # Eksport funksiyasini chaqirish
+        print(f"🔄 handle_export_users: export_users_to_txt() chaqirilmoqda...")
+        success, result = export_users_to_txt()
+        
         if success:
-            with open(result, 'rb') as f:
-                await bot.send_document(cid, f, caption="� Foydalanuvchilar ro'yxati (Telega.io uchun)")
-            os.remove(result)
-            logger.info(f"Users exported by admin {m.from_user.id}")
+            export_path = result
+            print(f"✅ Eksport muvaffaqiyatli, fayl yo'li: {export_path}")
+            
+            # Faylni tekshirish
+            if os.path.exists(export_path):
+                file_size = os.path.getsize(export_path)
+                print(f"🔄 Fayl yuborilmoqda: {export_path} ({file_size} bytes)")
+                
+                with open(export_path, 'rb') as f:
+                    await bot.send_document(cid, f, caption=f"📋 Foydalanuvchilar ro'yxati ({users_count} ta) - Telega.io uchun")
+                
+                # Faylni o'chirish
+                try:
+                    os.remove(export_path)
+                    print(f"✅ Fayl o'chirildi: {export_path}")
+                except Exception as del_err:
+                    print(f"⚠️ Faylni o'chirishda xato: {del_err}")
+                
+                logger.info(f"Users exported by admin {m.from_user.id} - {users_count} users")
+            else:
+                print(f"❌ Fayl topilmadi: {export_path}")
+                await bot.send_message(cid, "❌ Eksport fayli yaratildi lekin topilmadi.")
         else:
-            # Agar baza bo'sh bo'lsa yoki xato bo'lsa
-            await bot.send_message(cid, "ℹ️ Hozircha foydalanuvchilar yo'q yoki bazada ma'lumot topilmadi.")
+            # Eksport xatosi
+            print(f"❌ Eksport xatosi: {result}")
+            await bot.send_message(cid, f"ℹ️ Eksport xatosi: {result}")
     except Exception as e:
+        print(f"❌ Eksport xatosi tafsiloti: {str(e)}")
+        import traceback
+        print(f"❌ Traceback: {traceback.format_exc()}")
         logger.error(f"Export users error: {e}")
-        await bot.send_message(m.chat.id, "ℹ️ Eksport xatosi. Bazada foydalanuvchilar yo'q bo'lishi mumkin.")
+        await bot.send_message(m.chat.id, f"ℹ️ Eksport xatosi: {str(e)[:200]}")
+    finally:
+        # Agar fayl qolib ketgan bo'lsa, uni o'chirish
+        if export_path and os.path.exists(export_path):
+            try:
+                os.remove(export_path)
+                print(f"🔄 Finally: Fayl o'chirildi: {export_path}")
+            except:
+                pass
 
 # ================= AUTO POST =================
 async def handle_autopost(m):

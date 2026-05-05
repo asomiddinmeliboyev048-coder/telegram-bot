@@ -201,28 +201,65 @@ def get_users_count():
         return 0
 
 
-def export_users_to_txt(filename='users_export.txt'):
-    """
-    Barcha foydalanuvchi ID larini .txt faylga eksport qilish
-    Telega.io uchun formatda: har bir ID alohida qatorda
-    """
+def export_users_to_txt():
+    """Barcha foydalanuvchilarning ID larini txt faylga eksport qilish (Telega.io uchun)"""
+    export_path = '/tmp/users_export.txt'
+    
     try:
-        users = get_all_users()
+        print("🔄 export_users_to_txt chaqirildi...")
+        print(f"🔄 Fayl yo'lidan foydalanish: {export_path}")
         
-        if not users:
+        # Jadval mavjudligini tekshirish
+        if not ensure_table_exists():
+            print("❌ export_users_to_txt: Jadval mavjud emas!")
+            return False, "Baza jadvali mavjud emas"
+        
+        # Bazadan foydalanuvchilarni olish
+        print("🔄 Bazadan foydalanuvchilarni olish...")
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT user_id FROM users ORDER BY joined_date DESC')
+        rows = cursor.fetchall()
+        conn.close()
+        
+        print(f"✅ SQL natija: {len(rows)} ta foydalanuvchi topildi")
+        
+        # Agar foydalanuvchilar bo'lmasa
+        if not rows:
+            print("⚠️ Bazada foydalanuvchilar yo'q")
             return False, "Bazada foydalanuvchilar yo'q"
         
-        # /tmp da saqlash (Render uchun)
-        filepath = os.path.join('/tmp', filename)
+        # Eski eksport faylni o'chirish (agar mavjud bo'lsa)
+        if os.path.exists(export_path):
+            try:
+                os.remove(export_path)
+                print(f"🔄 Eski fayl o'chirildi: {export_path}")
+            except Exception as del_err:
+                print(f"⚠️ Eski faylni o'chirishda xato: {del_err}")
         
-        with open(filepath, 'w', encoding='utf-8') as f:
-            for user_id in users:
-                f.write(f"{user_id}\n")
+        # Faylga yozish
+        print(f"🔄 Faylga yozish boshlandi: {export_path}")
+        with open(export_path, 'w', encoding='utf-8') as f:
+            f.write("# Telega.io format - Foydalanuvchilar ID ro'yxati\n")
+            f.write(f"# Jami foydalanuvchilar: {len(rows)}\n")
+            f.write("#=====================================\n\n")
+            for row in rows:
+                f.write(f"{row[0]}\n")  # user_id ni yozish
         
-        print(f"✅ Eksport tayyor: {filepath} ({len(users)} ta foydalanuvchi)")
-        return True, filepath
+        # Fayl yaratilganini tekshirish
+        if os.path.exists(export_path):
+            file_size = os.path.getsize(export_path)
+            print(f"✅ Fayl yaratildi: {export_path} ({file_size} bytes, {len(rows)} ta user)")
+            return True, export_path
+        else:
+            print(f"❌ Fayl yaratilmadi: {export_path}")
+            return False, "Fayl yaratilmadi"
+            
     except Exception as e:
         print(f"❌ export_users_to_txt xatosi: {e}")
+        import traceback
+        print(f"❌ Traceback: {traceback.format_exc()}")
         return False, str(e)
 
 
