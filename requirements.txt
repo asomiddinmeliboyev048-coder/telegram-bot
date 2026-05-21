@@ -2,6 +2,9 @@
 # Core async Telegram bot
 pyTelegramBotAPI>=4.15.0
 
+# Firebase Admin SDK (for Realtime Database)
+firebase-admin>=6.5.0
+
 # Media processing
 yt-dlp>=2025.4.0
 edge-tts>=6.1.9

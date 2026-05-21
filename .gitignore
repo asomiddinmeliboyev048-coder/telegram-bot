@@ -30,3 +30,6 @@ www.youtube.com_cookies.txt
 # OS
 .DS_Store
 Thumbs.db
+serviceAccountKey.json
+users.db
+__pycache__/

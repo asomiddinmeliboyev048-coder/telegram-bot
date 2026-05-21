@@ -9,6 +9,7 @@ import logging
 import tempfile
 import time
 import sys
+import sqlite3
 from pathlib import Path
 from functools import wraps
 
@@ -17,12 +18,14 @@ from telebot import types
 from telebot.async_telebot import AsyncTeleBot
 
 # Database import
-from database import add_user, get_all_users, get_users_count, export_users_to_txt, get_user_stats
+from database import (
+    add_user, get_all_users, get_users_count, export_users_to_txt, get_user_stats,
+    firebase_save_user, firebase_get_user_count
+)
 
 # Lazy imports - loaded only when needed
 yt_dlp = None
 edge_tts = None
-pydub = None
 
 # ================= FAST STARTUP =================
 load_dotenv()
@@ -263,7 +266,12 @@ async def start(m):
         username = m.from_user.username if m.from_user.username else None
         first_name = m.from_user.first_name if m.from_user.first_name else None
         last_name = m.from_user.last_name if m.from_user.last_name else None
+        
+        # SQLite'ga saqlash
         save_user(user_id, username, first_name, last_name)
+        
+        # Firebase'ga ham saqlash (agar mavjud bo'lmasa, yangi bo'lsa)
+        firebase_save_user(user_id, username, first_name, last_name)
 
         is_subscribed = await check_subscription(user_id)
         if not is_subscribed:
@@ -304,12 +312,25 @@ async def stat_cmd(m):
     """Bot statistikasi - faqat admin uchun"""
     try:
         if m.from_user.id == OWNER_ID:
+            # Firebase'dan user count ni olish
+            firebase_count = firebase_get_user_count()
+            
+            # 1480 qo'shish (yo'qolgan users uchun)
+            LOST_USERS = 1480
+            total_users = firebase_count + LOST_USERS
+            
+            # SQLite statistikasini ham olish (bugun, bu hafta uchun)
             stats = get_user_stats()
+            
             stats_text = f"""📊 <b>Bot statistikasi:</b>
 
-👥 <b>Jami foydalanuvchilar:</b> {stats['total']}
-📅 <b>Bugun qo'shilgan:</b> {stats['today']}
-📆 <b>Hafta davomida:</b> {stats['week']}
+🔥 <b>JAMI FOYDALANUVCHILAR (Firebase + Lost):</b> {total_users}
+  └─ Firebase: {firebase_count}
+  └─ Yo'qolgan users: {LOST_USERS}
+
+👥 <b>SQLite qo'shilganlar:</b>
+  └─ Bugun qo'shilgan: {stats['today']}
+  └─ Bu hafta qo'shilgan: {stats['week']}
 
 ✅ @foyda1ii_bot"""
             await bot.send_message(m.chat.id, stats_text, parse_mode='HTML')
@@ -392,12 +413,25 @@ async def text_handler(m):
             return
 
         if txt == "📊 Statistika" and user_id == OWNER_ID:
+            # Firebase'dan user count ni olish
+            firebase_count = firebase_get_user_count()
+            
+            # 1480 qo'shish (yo'qolgan users uchun)
+            LOST_USERS = 1480
+            total_users = firebase_count + LOST_USERS
+            
+            # SQLite statistikasini ham olish (bugun, bu hafta uchun)
             stats = get_user_stats()
+            
             stats_text = f"""📊 <b>Bot statistikasi:</b>
 
-👥 Jami foydalanuvchilar: <b>{stats['total']}</b>
-📅 Bugun qo'shilgan: <b>{stats['today']}</b>
-📆 Bu hafta qo'shilgan: <b>{stats['week']}</b>
+🔥 <b>JAMI FOYDALANUVCHILAR (Firebase + Lost):</b> {total_users}
+  └─ Firebase: {firebase_count}
+  └─ Yo'qolgan users: {LOST_USERS}
+
+👥 <b>SQLite qo'shilganlar:</b>
+  └─ Bugun qo'shilgan: {stats['today']}
+  └─ Bu hafta qo'shilgan: {stats['week']}
 
 ✅ @foyda1ii_bot"""
             await bot.send_message(cid, stats_text, parse_mode='HTML')
@@ -491,16 +525,12 @@ async def handle_tts(m):
             mixed_path = os.path.join(TEMP_DIR, f"{cid}_venom_mixed.mp3")
             
             try:
-                global pydub
-                if pydub is None:
-                    from pydub import AudioSegment
-                    from pydub.effects import speedup
-                    pydub = AudioSegment
+                from pydub import AudioSegment
                 
                 await bot.edit_message_text("🎭 Venom: pydub orqali qatlamlar yaratilmoqda...", cid, msg.message_id)
                 
                 # Asosiy ovozni yuklash
-                audio = pydub.from_mp3(input_path)
+                audio = AudioSegment.from_mp3(input_path)
                 
                 # LAYER 1: Asosiy ovoz - Pitch -10, sekin 0.8x
                 # Frame rate ni pastga tushirib (pitch pasaytirish) + uzunligi oshirish (sekin)
@@ -533,11 +563,11 @@ async def handle_tts(m):
                 # Ikkala qatlamni aralashtirish
                 await bot.edit_message_text("🎭 Venom: Qatlamar aralashtirilmoqda + reverb...", cid, msg.message_id)
                 
-                layer1_audio = pydub.from_mp3(layer1_path)
-                layer2_audio = pydub.from_mp3(layer2_path)
+                layer1_audio = AudioSegment.from_mp3(layer1_path)
+                layer2_audio = AudioSegment.from_mp3(layer2_path)
                 
                 # Layer 2 ni 50ms kechiktirish (echo effekti uchun) - kamaytirildi
-                silence = pydub.silent(duration=50)
+                silence = AudioSegment.silent(duration=50)
                 layer2_with_delay = silence + layer2_audio
                 
                 # Aralashtirish (mix) - Layer 2 ovozini pastroq aralashtirish (15% mix)
@@ -547,7 +577,7 @@ async def handle_tts(m):
                 # Reverb effekti (oddiy echo) - JUDA PAST (10% mix)
                 # 80ms kechikish bilan takrorlash (200ms dan 80ms ga kamaytirildi)
                 echo1 = mixed - 20  # -20dB = ~10% hajmda (juda past)
-                echo_silence = pydub.silent(duration=80)
+                echo_silence = AudioSegment.silent(duration=80)
                 echo1 = echo_silence + echo1
                 
                 # Faqat 10% echo aralashtirish - nutq aniq eshitilsin
