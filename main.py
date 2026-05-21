@@ -20,7 +20,8 @@ from telebot.async_telebot import AsyncTeleBot
 # Database import
 from database import (
     add_user, get_all_users, get_users_count, export_users_to_txt, get_user_stats,
-    firebase_save_user, firebase_get_user_count
+    firebase_save_user, firebase_get_user_count, FIREBASE_AVAILABLE, 
+    get_all_user_ids_combined
 )
 
 # Lazy imports - loaded only when needed
@@ -312,26 +313,29 @@ async def stat_cmd(m):
     """Bot statistikasi - faqat admin uchun"""
     try:
         if m.from_user.id == OWNER_ID:
-            # Firebase'dan user count ni olish
-            firebase_count = firebase_get_user_count()
+            # Firebase'dan user count ni olish (agar mavjud bo'lsa)
+            firebase_count = firebase_get_user_count() if FIREBASE_AVAILABLE else 0
             
-            # 1480 qo'shish (yo'qolgan users uchun)
+            # Jami foydalanuvchilar soni (migratsiyadagi yo'qolganlarni hisobga olib)
             LOST_USERS = 1480
-            total_users = firebase_count + LOST_USERS
+            total_users = max(firebase_count, LOST_USERS)
             
             # SQLite statistikasini ham olish (bugun, bu hafta uchun)
             stats = get_user_stats()
             
+            firebase_status = "✅ Firebase ulangan" if FIREBASE_AVAILABLE else "⚠️ Firebase ulanmagan"
+            
             stats_text = f"""📊 <b>Bot statistikasi:</b>
 
-🔥 <b>JAMI FOYDALANUVCHILAR (Firebase + Lost):</b> {total_users}
-  └─ Firebase: {firebase_count}
-  └─ Yo'qolgan users: {LOST_USERS}
+🔥 <b>JAMI FOYDALANUVCHILAR:</b> {total_users}
+  └─ Firebase (Bulutda): {firebase_count}
+  └─ Migratsiyadagi (yo'q): {LOST_USERS}
 
 👥 <b>SQLite qo'shilganlar:</b>
   └─ Bugun qo'shilgan: {stats['today']}
   └─ Bu hafta qo'shilgan: {stats['week']}
 
+🔗 {firebase_status}
 ✅ @foyda1ii_bot"""
             await bot.send_message(m.chat.id, stats_text, parse_mode='HTML')
         else:
@@ -413,26 +417,29 @@ async def text_handler(m):
             return
 
         if txt == "📊 Statistika" and user_id == OWNER_ID:
-            # Firebase'dan user count ni olish
-            firebase_count = firebase_get_user_count()
+            # Firebase'dan user count ni olish (agar mavjud bo'lsa)
+            firebase_count = firebase_get_user_count() if FIREBASE_AVAILABLE else 0
             
-            # 1480 qo'shish (yo'qolgan users uchun)
+            # Jami foydalanuvchilar soni (migratsiyadagi yo'qolganlarni hisobga olib)
             LOST_USERS = 1480
-            total_users = firebase_count + LOST_USERS
+            total_users = max(firebase_count, LOST_USERS)
             
             # SQLite statistikasini ham olish (bugun, bu hafta uchun)
             stats = get_user_stats()
             
+            firebase_status = "✅ Firebase ulangan" if FIREBASE_AVAILABLE else "⚠️ Firebase ulanmagan"
+            
             stats_text = f"""📊 <b>Bot statistikasi:</b>
 
-🔥 <b>JAMI FOYDALANUVCHILAR (Firebase + Lost):</b> {total_users}
-  └─ Firebase: {firebase_count}
-  └─ Yo'qolgan users: {LOST_USERS}
+🔥 <b>JAMI FOYDALANUVCHILAR:</b> {total_users}
+  └─ Firebase (Bulutda): {firebase_count}
+  └─ Migratsiyadagi (yo'q): {LOST_USERS}
 
 👥 <b>SQLite qo'shilganlar:</b>
   └─ Bugun qo'shilgan: {stats['today']}
   └─ Bu hafta qo'shilgan: {stats['week']}
 
+🔗 {firebase_status}
 ✅ @foyda1ii_bot"""
             await bot.send_message(cid, stats_text, parse_mode='HTML')
             return
@@ -658,7 +665,8 @@ async def handle_tts(m):
 # ================= BROADCAST =================
 async def handle_broadcast(m):
     cid = m.chat.id
-    users = get_users()
+    # SQLite va Firebase'dan birlashtirilgan foydalanuvchilar ID'larini olish
+    users = get_all_user_ids_combined()
     success = 0
     failed = 0
     try:
@@ -1445,36 +1453,48 @@ async def main():
     logger.info("🚀 Starting bot on Render...")
     logger.info(f"📁 Temp dir: {TEMP_DIR}")
 
+    # 0. Firebase initialize qilish
+    print("[0/5] Firebase Realtime Database boshlanyapti...")
+    try:
+        from database import initialize_firebase
+        firebase_ready = initialize_firebase()
+        if firebase_ready:
+            print("✅ [0/5] Firebase ulandi!")
+        else:
+            print("⚠️ [0/5] Firebase ulanmadi, SQLite-only mode")
+    except Exception as e:
+        print(f"⚠️ [0/5] Firebase xato: {e}")
+
     # 1. Remove webhook
-    print("[1/4] Webhook tozalanyapti...")
+    print("[1/5] Webhook tozalanyapti...")
     try:
         await bot.remove_webhook(drop_pending_updates=True)
-        print("✅ [1/4] Webhook tozalandi!")
+        print("✅ [1/5] Webhook tozalandi!")
     except Exception as e:
-        print(f"⚠️ [1/4] Webhook xato: {e}")
+        print(f"⚠️ [1/5] Webhook xato: {e}")
 
     # 2. Flask server
-    print("[2/4] Flask server ishga tushirilmoqda...")
+    print("[2/5] Flask server ishga tushirilmoqda...")
     run_flask_server()
-    print("✅ [2/4] Flask ishga tushdi!")
+    print("✅ [2/5] Flask ishga tushdi!")
 
     # 3. Temp dir check
-    print("[3/4] Temp directory tekshirilmoqda...")
+    print("[3/5] Temp directory tekshirilmoqda...")
     try:
         test_file = os.path.join(TEMP_DIR, "startup_test.tmp")
         with open(test_file, "w") as f:
             f.write("test")
         os.remove(test_file)
-        print("✅ [3/4] Temp directory OK!")
+        print("✅ [3/5] Temp directory OK!")
     except Exception as e:
-        print(f"⚠️ [3/4] Temp xato: {e}")
+        print(f"⚠️ [3/5] Temp xato: {e}")
 
     # 4. Background tasks
-    print("[4/4] Background tasks ishga tushirilmoqda...")
+    print("[4/5] Background tasks ishga tushirilmoqda...")
     asyncio.create_task(auto_post_loop())
     asyncio.create_task(video_queue_worker())
     asyncio.create_task(periodic_temp_cleanup())
-    print("✅ [4/4] Background tasks tayyor!")
+    print("✅ [4/5] Background tasks tayyor!")
 
     print("🔥 BOT POLLING BOSHLANDI")
     sys.stdout.flush()

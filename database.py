@@ -1,13 +1,8 @@
-"""
-SQLite + Firebase Realtime Database Integration
-Foydalanuvchilar bazasi - Render.com muhiti uchun moslangan
-SQLite: /tmp/users.db da saqlanadi (local, vaqtinchalik)
-Firebase: Cloud Realtime Database (doimiy saqlash)
-"""
-
 import sqlite3
 import os
 import time
+import json
+import tempfile
 from datetime import datetime
 
 # ================== FIREBASE SETUP ==================
@@ -24,41 +19,70 @@ firebase_initialized = False
 
 def initialize_firebase():
     """Firebase Realtime Database initialization"""
-    global firebase_app, firebase_initialized
+    global firebase_app, firebase_initialized, FIREBASE_AVAILABLE
 
     if not FIREBASE_AVAILABLE:
         print("⚠️ Firebase SDK mavjud emas. SQLite-only mode.")
         return False
 
-    # Agar allaqachon boshlangan bo'lsa
     if firebase_initialized and firebase_app:
         return True
 
     try:
-        KEY_PATH = os.getenv("FIREBASE_KEY_PATH", "./serviceAccountKey.json")
-        DB_URL   = os.getenv(
+        # Standart ma'lumotlar bazasi URL manzili
+        DB_URL = os.getenv(
             "FIREBASE_DATABASE_URL",
             "https://matnovozbot-eb09c-default-rtdb.europe-west1.firebasedatabase.app"
         )
+        
+        # 1. BIRINCHI NAVBATDA RENDER MUHITIDAGI JSON MATNNI TEKSHIRAMIZ
+        config_json_str = os.getenv("FIREBASE_CONFIG_JSON")
+        
+        if config_json_str:
+            try:
+                print(f"🔄 FIREBASE_CONFIG_JSON muhit o'zgaruvchisidan foydalanilmoqda...")
+                config_data = json.loads(config_json_str)
+                
+                # Render uchun vaqtinchalik xavfsiz papkada kalit faylini yaratamiz
+                temp_key_path = os.path.join(tempfile.gettempdir(), "firebase_key.json")
+                with open(temp_key_path, 'w') as f:
+                    json.dump(config_data, f)
+                
+                KEY_PATH = temp_key_path
+                print(f"✅ Vaqtinchalik Firebase key fayli yaratildi: {KEY_PATH}")
+                
+                # Firebase-ni ishga tushirish
+                cred = credentials.Certificate(KEY_PATH)
+                firebase_app = firebase_admin.initialize_app(cred, {'databaseURL': DB_URL})
+                firebase_initialized = True
+                FIREBASE_AVAILABLE = True
+                print("🚀 Firebase bulutli bazasi RENDER panelidan muvaffaqiyatli ulandi!")
+                return True
+            except Exception as e:
+                print(f"⚠️ FIREBASE_CONFIG_JSON parse xatosi: {e}.")
+        
+        # 2. AGAR RENDER JSON BO'LMASA, LOKAL FAYLNI TEKSHIRAMIZ (KOMPYUTER UCHUN)
+        KEY_PATH = os.getenv("FIREBASE_KEY_PATH", "./serviceAccountKey.json")
+        if os.path.exists(KEY_PATH):
+            try:
+                print(f"🔄 Lokal {KEY_PATH} faylidan foydalanilmoqda...")
+                cred = credentials.Certificate(KEY_PATH)
+                firebase_app = firebase_admin.initialize_app(cred, {'databaseURL': DB_URL})
+                firebase_initialized = True
+                FIREBASE_AVAILABLE = True
+                print("🚀 Firebase bulutli bazasi LOKAL fayldan muvaffaqiyatli ulandi!")
+                return True
+            except Exception as e:
+                print(f"❌ Lokal fayl orqali ulanishda xatolik: {e}")
 
-        if not os.path.exists(KEY_PATH):
-            print(f"⚠️ serviceAccountKey.json topilmadi: {KEY_PATH}. SQLite-only mode.")
-            return False
-
-        # Agar allaqachon initialize qilingan bo'lsa (reload holati)
-        try:
-            firebase_app = firebase_admin.get_app()
-        except ValueError:
-            cred = credentials.Certificate(KEY_PATH)
-            firebase_app = firebase_admin.initialize_app(cred, {'databaseURL': DB_URL})
-
-        firebase_initialized = True
-        print(f"✅ Firebase ulandi! DB: {DB_URL}")
-        return True
+        # Hech biri topilmasa
+        print(f"⚠️ serviceAccountKey.json topilmadi va FIREBASE_CONFIG_JSON ham yo'q. SQLite-only mode.")
+        FIREBASE_AVAILABLE = False
+        return False
 
     except Exception as e:
-        print(f"⚠️ Firebase ulanish xatosi: {e}. SQLite-only mode.")
-        firebase_initialized = False
+        print(f"❌ Firebase-ni init qilishda kutilmagan global xatolik: {e}")
+        FIREBASE_AVAILABLE = False
         return False
 
 
@@ -141,6 +165,38 @@ def firebase_get_all_user_ids():
         return [int(uid) for uid in all_users.keys()]
     except Exception as e:
         print(f"⚠️ firebase_get_all_user_ids xato: {e}")
+        return []
+
+
+def get_all_user_ids_combined():
+    """
+    SQLite va Firebase'dan birlashtirilgan barcha user ID larni olish.
+    Duplicate tekshiruvi bilan yagona ro'yxat qaytaradi.
+    """
+    try:
+        # SQLite'dan user ID larni olish
+        sqlite_ids = []
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM users")
+            sqlite_ids = [row[0] for row in cursor.fetchall()]
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ SQLite'dan user ID olishda xato: {e}")
+            sqlite_ids = []
+        
+        # Firebase'dan user ID larni olish
+        firebase_ids = firebase_get_all_user_ids()
+        
+        # Birlashtirilgan set (takrorlanishni olib tashlash)
+        combined_ids = set(sqlite_ids) | set(firebase_ids)
+        result = sorted(list(combined_ids))
+        
+        print(f"📊 Foydalanuvchilar: SQLite={len(sqlite_ids)}, Firebase={len(firebase_ids)}, Birlashtirilgan={len(result)}")
+        return result
+    except Exception as e:
+        print(f"⚠️ get_all_user_ids_combined xato: {e}")
         return []
 
 
