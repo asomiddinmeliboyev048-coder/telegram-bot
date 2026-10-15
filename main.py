@@ -10,6 +10,8 @@ import tempfile
 import time
 import sys
 import sqlite3
+import uuid
+import random
 from pathlib import Path
 from functools import wraps
 
@@ -42,12 +44,14 @@ logger = logging.getLogger(__name__)
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-CHANNEL = -1003877967882
-OWNER_ID = 7171330738
+CHANNEL = int(os.getenv("CHANNEL_ID", "-1003877967882"))
+OWNER_ID = int(os.getenv("OWNER_ID", "7171330738"))
 CIRCLE_SIZE = 320
 
 # Use Render disk or system temp
-TEMP_DIR = os.getenv("RENDER_DISK_PATH", tempfile.gettempdir())
+# Alohida papka: tozalash funksiyasi boshqa tizim fayllariga tegmasligi uchun
+TEMP_DIR = os.path.join(os.getenv("RENDER_DISK_PATH", tempfile.gettempdir()), "tgbot_tmp")
+os.makedirs(TEMP_DIR, exist_ok=True)
 logger.info(f"Using temp dir: {TEMP_DIR}")
 
 # ================= BOT INSTANCE (GLOBAL) =================
@@ -68,6 +72,14 @@ user_voice = {}
 active_tasks = {}
 
 # ================= LAZY LOAD =================
+def load_edge_tts():
+    """Faqat edge_tts ni yuklaydi (yt_dlp xatosi TTS ni buzmasligi uchun)"""
+    global edge_tts
+    if edge_tts is None:
+        import edge_tts as et
+        edge_tts = et
+    return edge_tts
+
 def lazy_load_modules():
     global yt_dlp, edge_tts
     if yt_dlp is None:
@@ -132,6 +144,13 @@ def safe_remove(filepath):
             os.remove(filepath)
     except Exception:
         pass
+
+async def safe_edit(text, cid, msg_id, **kwargs):
+    """Xabarni tahrirlash; xato bo'lsa (masalan 'message is not modified') jim o'tadi"""
+    try:
+        await bot.edit_message_text(text, cid, msg_id, **kwargs)
+    except Exception as e:
+        logger.debug(f"safe_edit ignored: {e}")
 
 # ================= FLASK HEALTH CHECK =================
 def run_flask_server():
@@ -489,157 +508,164 @@ async def text_handler(m):
             pass
 
 # ================= TTS =================
+TTS_PROXY = os.getenv("TTS_PROXY") or None   # ixtiyoriy: http://user:pass@host:port
+MAX_TTS_CHARS = 3000
+EDGE_SAMPLE_RATE = 24000                      # edge-tts mp3 chastotasi
+
+TTS_VOICES = {
+    "male": "uz-UZ-SardorNeural",
+    "female": "uz-UZ-MadinaNeural",
+    "funny": "uz-UZ-MadinaNeural",
+    "venom": "uz-UZ-SardorNeural",
+}
+
+async def synthesize_with_retry(text, voice, out_path, attempts=3):
+    """Edge TTS ga qayta urinish bilan ulanish (403 va tarmoq xatolari uchun)"""
+    et = load_edge_tts()
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            kwargs = {"text": text, "voice": voice}
+            if TTS_PROXY:
+                kwargs["proxy"] = TTS_PROXY
+            communicate = et.Communicate(**kwargs)
+            await communicate.save(out_path)
+            if os.path.exists(out_path) and os.path.getsize(out_path) > 100:
+                return True
+            last_error = RuntimeError("Bo'sh audio qaytdi")
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Edge TTS urinish {attempt}/{attempts} muvaffaqiyatsiz: {e}")
+        safe_remove(out_path)
+        if attempt < attempts:
+            await asyncio.sleep(2 * attempt)  # 2s, 4s kutish
+    raise last_error
+
+def build_venom_effect_sync(input_path, layer1_path, layer2_path, mixed_path):
+    """Venom effekti (pydub). Og'ir hisob-kitob, shuning uchun alohida threadda ishlatiladi."""
+    from pydub import AudioSegment
+
+    audio = AudioSegment.from_mp3(input_path)
+
+    # LAYER 1: juda past ovoz (~ -10 semiton)
+    layer1 = audio._spawn(audio.raw_data, overrides={
+        'frame_rate': int(audio.frame_rate * 0.56)
+    }).set_frame_rate(44100)
+    layer1 = layer1.speedup(playback_speed=1.25)
+    layer1 = layer1.low_pass_filter(800)
+    layer1 = layer1 + 6
+    layer1.export(layer1_path, format="mp3")
+
+    # LAYER 2: biroz balandroq (~ -5 semiton)
+    layer2 = audio._spawn(audio.raw_data, overrides={
+        'frame_rate': int(audio.frame_rate * 0.75)
+    }).set_frame_rate(44100)
+    layer2 = layer2.speedup(playback_speed=1.25)
+    layer2 = layer2.low_pass_filter(1000)
+    layer2 = layer2 - 2
+    layer2.export(layer2_path, format="mp3")
+
+    layer1_audio = AudioSegment.from_mp3(layer1_path)
+    layer2_audio = AudioSegment.from_mp3(layer2_path)
+
+    # Layer 2 ni 50ms kechiktirib, pastroq aralashtirish
+    layer2_with_delay = AudioSegment.silent(duration=50) + layer2_audio
+    layer2_with_delay = layer2_with_delay - 12
+    mixed = layer1_audio.overlay(layer2_with_delay, position=0)
+
+    # Juda past reverb (echo)
+    echo1 = AudioSegment.silent(duration=80) + (mixed - 20)
+    mixed = mixed.overlay(echo1, position=0, gain_during_overlay=0)
+
+    mixed = mixed.low_pass_filter(600)
+    mixed = mixed + 3
+    mixed.export(mixed_path, format="mp3")
+    return mixed_path
+
+def run_ffmpeg_filter_sync(input_path, output_path, audio_filter, timeout=45):
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", input_path,
+           "-af", audio_filter, "-ar", "44100", "-ac", "1", output_path]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    ok = result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0
+    if not ok:
+        logger.warning(f"ffmpeg filter '{audio_filter}' xatosi: {result.stderr[:300]}")
+    return ok
+
 async def handle_tts(m):
-    lazy_load_modules()
     cid = m.chat.id
-    txt = m.text
+    txt = (m.text or "").strip()
+    if not txt:
+        return
+    if len(txt) > MAX_TTS_CHARS:
+        await bot.send_message(cid, f"⚠️ Matn juda uzun ({len(txt)} belgi). {MAX_TTS_CHARS} belgidan oshmasin.")
+        return
+
     voice_type = user_voice.get(cid, "female")
-    input_path = None
-    output_path = None
+    voice = TTS_VOICES.get(voice_type, TTS_VOICES["female"])
     MAX_CAPTION = 900
 
+    uid = uuid.uuid4().hex[:8]   # bir vaqtda kelgan xabarlar fayllari to'qnashmasligi uchun
+    input_path = os.path.join(TEMP_DIR, f"{cid}_{uid}_tts_input.mp3")
+    output_path = os.path.join(TEMP_DIR, f"{cid}_{uid}_tts_output.mp3")
+    layer1_path = os.path.join(TEMP_DIR, f"{cid}_{uid}_venom_layer1.mp3")
+    layer2_path = os.path.join(TEMP_DIR, f"{cid}_{uid}_venom_layer2.mp3")
+    mixed_path = os.path.join(TEMP_DIR, f"{cid}_{uid}_venom_mixed.mp3")
+    caption_text = txt if len(txt) <= 100 else txt[:100] + "..."
+    msg = None
+
     try:
-        if voice_type == "funny":
-            voice = "uz-UZ-MadinaNeural"
-        elif voice_type == "venom":
-            voice = "uz-UZ-SardorNeural"
-        else:
-            voice = "uz-UZ-SardorNeural" if voice_type == "male" else "uz-UZ-MadinaNeural"
-
-        input_path = os.path.join(TEMP_DIR, f"{cid}_tts_input.mp3")
-        output_path = os.path.join(TEMP_DIR, f"{cid}_tts_output.mp3")
-        caption_text = txt if len(txt) <= 100 else txt[:100] + "..."
-
         msg = await bot.send_message(cid, "🎙️ Ovoz yaratilmoqda...")
-        communicate = edge_tts.Communicate(text=txt, voice=voice)
-        await communicate.save(input_path)
 
-        if not os.path.exists(input_path) or os.path.getsize(input_path) < 100:
-            await bot.edit_message_text("❌ Audio yaratilmadi. Iltimos, qisqaroq matn yuboring.", cid, msg.message_id)
+        try:
+            await synthesize_with_retry(txt, voice, input_path)
+        except Exception as tts_err:
+            logger.error(f"TTS to'liq muvaffaqiyatsiz: {tts_err}")
+            if "403" in str(tts_err):
+                friendly = "⚠️ Ovoz xizmati vaqtincha band. Birozdan keyin qayta urinib ko'ring."
+            else:
+                friendly = "❌ Audio yaratilmadi. Qisqaroq matn yuborib ko'ring."
+            await safe_edit(friendly, cid, msg.message_id)
             return
 
+        file_to_send = input_path
+
         if voice_type == "venom":
-            await bot.edit_message_text("🎭 Venom effekt: Ikki qatlamli DSP ishlov berilmoqda...", cid, msg.message_id)
-            
-            # VENOM EFFEKT: Professional pydub-based DSP processing
-            # - Pitch shift: -10 semitones (very low bass)
-            # - Speed: 0.8x (slow and menacing)
-            # - Dual layer (same voice mixed with lower version)
-            # - Echo/Reverb for depth
-            
-            layer1_path = os.path.join(TEMP_DIR, f"{cid}_venom_layer1.mp3")
-            layer2_path = os.path.join(TEMP_DIR, f"{cid}_venom_layer2.mp3")
-            mixed_path = os.path.join(TEMP_DIR, f"{cid}_venom_mixed.mp3")
-            
+            await safe_edit("🎭 Venom effekti qo'llanilmoqda...", cid, msg.message_id)
             try:
-                from pydub import AudioSegment
-                
-                await bot.edit_message_text("🎭 Venom: pydub orqali qatlamlar yaratilmoqda...", cid, msg.message_id)
-                
-                # Asosiy ovozni yuklash
-                audio = AudioSegment.from_mp3(input_path)
-                
-                # LAYER 1: Asosiy ovoz - Pitch -10, sekin 0.8x
-                # Frame rate ni pastga tushirib (pitch pasaytirish) + uzunligi oshirish (sekin)
-                # Pitch shift uchun: frame_rate * 2^(-10/12) = ~0.56
-                # Speed uchun: 1/0.8 = 1.25
-                await bot.edit_message_text("🎭 Venom: 1-qatlam (juda past ovoz)...", cid, msg.message_id)
-                
-                layer1 = audio._spawn(audio.raw_data, overrides={
-                    'frame_rate': int(audio.frame_rate * 0.56)  # -10 semitones
-                }).set_frame_rate(44100)
-                # Sekinlashtirish (speed 0.8x = uzunlik 1.25x)
-                layer1 = layer1.speedup(playback_speed=1.25)  # 1/0.8 = 1.25
-                # Low pass filter effekti (bass boost uchun)
-                layer1 = layer1.low_pass_filter(800)
-                # Kuchaytirish
-                layer1 = layer1 + 6  # +6dB
-                layer1.export(layer1_path, format="mp3")
-                
-                # LAYER 2: Biroz balandroq - Pitch -5, sekin 0.8x
-                await bot.edit_message_text("🎭 Venom: 2-qatlam (qo'shimcha tekstura)...", cid, msg.message_id)
-                
-                layer2 = audio._spawn(audio.raw_data, overrides={
-                    'frame_rate': int(audio.frame_rate * 0.75)  # -5 semitones
-                }).set_frame_rate(44100)
-                layer2 = layer2.speedup(playback_speed=1.25)  # 0.8x speed
-                layer2 = layer2.low_pass_filter(1000)
-                layer2 = layer2 - 2  # -2dB (biroz pastroq)
-                layer2.export(layer2_path, format="mp3")
-                
-                # Ikkala qatlamni aralashtirish
-                await bot.edit_message_text("🎭 Venom: Qatlamar aralashtirilmoqda + reverb...", cid, msg.message_id)
-                
-                layer1_audio = AudioSegment.from_mp3(layer1_path)
-                layer2_audio = AudioSegment.from_mp3(layer2_path)
-                
-                # Layer 2 ni 50ms kechiktirish (echo effekti uchun) - kamaytirildi
-                silence = AudioSegment.silent(duration=50)
-                layer2_with_delay = silence + layer2_audio
-                
-                # Aralashtirish (mix) - Layer 2 ovozini pastroq aralashtirish (15% mix)
-                layer2_with_delay = layer2_with_delay - 12  # -12dB = ~15% hajmda
-                mixed = layer1_audio.overlay(layer2_with_delay, position=0)
-                
-                # Reverb effekti (oddiy echo) - JUDA PAST (10% mix)
-                # 80ms kechikish bilan takrorlash (200ms dan 80ms ga kamaytirildi)
-                echo1 = mixed - 20  # -20dB = ~10% hajmda (juda past)
-                echo_silence = AudioSegment.silent(duration=80)
-                echo1 = echo_silence + echo1
-                
-                # Faqat 10% echo aralashtirish - nutq aniq eshitilsin
-                mixed = mixed.overlay(echo1, position=0, gain_during_overlay=0)
-                
-                # Bass boost (low shelf)
-                mixed = mixed.low_pass_filter(600)
-                mixed = mixed + 3  # +3dB
-                
-                mixed.export(mixed_path, format="mp3")
-                file_to_send = mixed_path
+                file_to_send = await run_in_thread(
+                    build_venom_effect_sync, input_path, layer1_path, layer2_path, mixed_path
+                )
                 logger.info("✅ Venom pydub effect created successfully")
-                
-                # Vaqtinchalik fayllarni tozalash
-                safe_remove(layer1_path)
-                safe_remove(layer2_path)
-                    
             except Exception as e:
                 logger.error(f"Venom pydub error: {e}")
-                import traceback
-                traceback.print_exc()
-                # Xato bo'lsa, oddiy ffmpeg effektini ishlatish
+                # Zaxira: oddiy ffmpeg effekti (rubberband shart emas)
                 try:
-                    await bot.edit_message_text("🎭 Venom: Fallback effekt ishlatilmoqda...", cid, msg.message_id)
-                    cmd_simple = [
-                        "ffmpeg", "-y", "-i", input_path,
-                        "-af", "asetrate=44100*0.55,atempo=0.8,rubberband=pitch=-10,lowpass=f=800,volume=1.3",
-                        "-ar", "44100", "-ac", "1", output_path
-                    ]
-                    result = subprocess.run(cmd_simple, capture_output=True, text=True, timeout=45)
-                    file_to_send = output_path if (result.returncode == 0 and os.path.exists(output_path)) else input_path
+                    ok = await run_in_thread(
+                        run_ffmpeg_filter_sync, input_path, output_path,
+                        f"asetrate={EDGE_SAMPLE_RATE}*0.55,aresample=44100,lowpass=f=800,volume=1.3"
+                    )
+                    if ok:
+                        file_to_send = output_path
                 except Exception as fallback_error:
                     logger.error(f"Venom fallback error: {fallback_error}")
-                    file_to_send = input_path
 
         elif voice_type == "funny":
-            await bot.edit_message_text("🤡 Kulgili ovoz effekti qo'llanilmoqda...", cid, msg.message_id)
-            cmd_rubberband = ["ffmpeg", "-y", "-i", input_path, "-af", "rubberband=pitch=1.5", "-ar", "44100", "-ac", "1", output_path]
-            cmd_asetrate = ["ffmpeg", "-y", "-i", input_path, "-af", "asetrate=44100*1.4,atempo=1/1.4", "-ar", "44100", "-ac", "1", output_path]
-            file_to_send = input_path
-            try:
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, lambda: subprocess.run(cmd_rubberband, capture_output=True, text=True, timeout=30))
-                if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            await safe_edit("🤡 Kulgili ovoz effekti qo'llanilmoqda...", cid, msg.message_id)
+            filters = [
+                "rubberband=pitch=1.5",
+                f"asetrate={EDGE_SAMPLE_RATE}*1.4,atempo=0.714286,aresample=44100",
+            ]
+            for flt in filters:
+                try:
+                    ok = await run_in_thread(run_ffmpeg_filter_sync, input_path, output_path, flt, 30)
+                except Exception as e:
+                    logger.error(f"Funny voice error: {e}")
+                    ok = False
+                if ok:
                     file_to_send = output_path
-                else:
-                    result2 = await loop.run_in_executor(None, lambda: subprocess.run(cmd_asetrate, capture_output=True, text=True, timeout=30))
-                    if result2.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                        file_to_send = output_path
-            except Exception as e:
-                logger.error(f"Funny voice error: {e}")
-        else:
-            file_to_send = input_path
+                    break
 
-        await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg.message_id)
+        await safe_edit("📤 Yuborilmoqda...", cid, msg.message_id)
         voice_emoji = "🤡" if voice_type == "funny" else "🎭" if voice_type == "venom" else "🎙️"
         caption = f"{voice_emoji} {caption_text}\n✅ @foyda1ii_bot"
         if len(caption) > MAX_CAPTION:
@@ -648,19 +674,18 @@ async def handle_tts(m):
         with open(file_to_send, "rb") as f:
             await bot.send_voice(cid, f, caption=caption[:MAX_CAPTION])
 
-        await bot.delete_message(cid, msg.message_id)
+        try:
+            await bot.delete_message(cid, msg.message_id)
+        except Exception:
+            pass
         user_state[cid] = None
 
     except Exception as e:
         logger.error(f"TTS error: {e}")
         await bot.send_message(cid, f"❌ Xatolik: {str(e)[:100]}", reply_markup=main_menu())
     finally:
-        safe_remove(input_path)
-        safe_remove(output_path)
-        # Venom effekti uchun vaqtinchalik fayllarni ham tozalash
-        safe_remove(os.path.join(TEMP_DIR, f"{cid}_venom_layer1.mp3"))
-        safe_remove(os.path.join(TEMP_DIR, f"{cid}_venom_layer2.mp3"))
-        safe_remove(os.path.join(TEMP_DIR, f"{cid}_venom_mixed.mp3"))
+        for p in (input_path, output_path, layer1_path, layer2_path, mixed_path):
+            safe_remove(p)
 
 # ================= BROADCAST =================
 async def handle_broadcast(m):
@@ -989,7 +1014,6 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
         }
         
         # Random client tanlash (ios yoki android) - YouTube blokidan o'tish uchun
-        import random
         client_type = random.choice(['ios', 'android'])
         
         # Cookies fayli yo'lini aniqlash (Render uchun os.getcwd() ishlatamiz)
@@ -1038,7 +1062,7 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
             'youtube_include_dash_manifest': False,  # DASH manifestni o'tkazib yuborish
             'extractor_args': {
                 'youtube': {
-                    'player_client': client_type,  # Tasodifiy client (ios/android)
+                    'player_client': [client_type],  # Tasodifiy client (ios/android)
                     'player_skip': ['webpage', 'configs', 'js'],  # Tezlik uchun
                 }
             },
@@ -1449,7 +1473,7 @@ async def main():
         print("💥 FATAL ERROR: BOT_TOKEN environment variable is required!")
         raise ValueError("BOT_TOKEN environment variable is required!")
 
-    print(f"DEBUG: Token tekshirildi: {BOT_TOKEN[:10]}...")
+    print("DEBUG: Token tekshirildi")
     logger.info("🚀 Starting bot on Render...")
     logger.info(f"📁 Temp dir: {TEMP_DIR}")
 
