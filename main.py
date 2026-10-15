@@ -13,12 +13,16 @@ import sqlite3
 import uuid
 import html
 import random
+import shutil
 from pathlib import Path
 from functools import wraps
 
 from dotenv import load_dotenv
 from telebot import types
 from telebot.async_telebot import AsyncTeleBot
+
+# Premium tizimi (alohida modul: premium.py)
+import premium
 
 # Database import
 from database import (
@@ -50,10 +54,13 @@ OWNER_ID = int(os.getenv("OWNER_ID", "7171330738"))
 
 # ================= REKLAMA (PROMO) =================
 PROMO_URL = "https://zikra01.vercel.app"
-PROMO_HTML = (
-    f'🔗 <a href="{PROMO_URL}">Zikra — bilimlaringizni o\'zaro bepul almashing! '
-    f'Qurilmangizga o\'rnatib oling, ro\'yxatdan o\'tib kerakli maydonlarni to\'ldiring '
-    f'va ko\'nikmalaringizni bepul almashing: sen menga o\'rgat, men senga o\'rgataman.</a>'
+# Har bir so'rovdan keyin natija tagida faqat qisqa yozuv (bosilsa havola ochiladi)
+PROMO_HTML = f'🔗 <a href="{PROMO_URL}">Bepul bilim ol</a>'
+# Uzun tavsif — faqat /start da, tagida havola tugmasi bilan chiqadi
+PROMO_LONG = (
+    "🎓 <b>Zikra</b> — bilimlaringizni o'zaro bepul almashing!\n\n"
+    "Qurilmangizga o'rnatib oling, ro'yxatdan o'tib kerakli maydonlarni to'ldiring "
+    "va ko'nikmalaringizni bepul almashing: <i>sen menga o'rgat, men senga o'rgataman.</i>"
 )
 CIRCLE_SIZE = 320
 
@@ -161,6 +168,22 @@ async def safe_edit(text, cid, msg_id, **kwargs):
     except Exception as e:
         logger.debug(f"safe_edit ignored: {e}")
 
+# ================= PROMO HELPERS =================
+async def promo_for(user_id):
+    """Premium (va admin) foydalanuvchiga reklama chiqmaydi, qolganlarga qisqa havola qaytaradi."""
+    try:
+        if await run_in_thread(premium.is_premium, user_id):
+            return ""
+    except Exception as e:
+        logger.error(f"promo_for error: {e}")
+    return PROMO_HTML
+
+def promo_kb():
+    """Havola tugmasi: bosilganda Telegram 'Open this link?' oynasini ochadi."""
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔗 Bepul bilim ol", url=PROMO_URL))
+    return kb
+
 # ================= FLASK HEALTH CHECK =================
 def run_flask_server():
     try:
@@ -255,7 +278,7 @@ def get_users():
 def main_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     kb.add("🎤 Text → Voice", "🎬 Video → MP3")
-    kb.add("🔵 Circle Video")
+    kb.add("🔵 Circle Video", premium.BUTTON_TEXT)
     return kb
 
 def voice_menu():
@@ -269,8 +292,13 @@ def admin_menu():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("📢 Broadcast", "📊 Statistika")
     kb.add("📣 Auto Post", "📤 Eksport (Telega.io)")
-    kb.add("🔙 Orqaga")
+    kb.add(premium.ADMIN_BUTTON_TEXT, "🔙 Orqaga")
     return kb
+
+# ================= PREMIUM HANDLERLARI =================
+# MUHIM: umumiy text_handler dan OLDIN ro'yxatdan o'tishi kerak
+if bot:
+    premium.setup(bot, OWNER_ID, TEMP_DIR)
 
 # ================= SUBSCRIPTION CALLBACK =================
 @bot.callback_query_handler(func=lambda c: c.data == "check")
@@ -311,6 +339,13 @@ async def start(m):
             return
 
         await bot.send_message(cid, "🔥 BOTGA XUSH KELIBSIZ!", reply_markup=main_menu())
+
+        # Reklama (uzun tavsif + havola tugmasi) — faqat premium bo'lmaganlarga
+        if await promo_for(user_id):
+            await bot.send_message(
+                cid, PROMO_LONG, parse_mode='HTML',
+                reply_markup=promo_kb(), disable_web_page_preview=True
+            )
         print(f"DEBUG: /start reply sent to {m.chat.id}")
     except Exception as e:
         print(f"ERROR in start handler: {e}")
@@ -363,8 +398,7 @@ async def stat_cmd(m):
   └─ Bugun qo'shilgan: {stats['today']}
   └─ Bu hafta qo'shilgan: {stats['week']}
 
-🔗 {firebase_status}
-{PROMO_HTML}"""
+🔗 {firebase_status}"""
             await bot.send_message(m.chat.id, stats_text, parse_mode='HTML')
         else:
             await bot.send_message(m.chat.id, "❌ Bu komanda faqat admin uchun!")
@@ -433,7 +467,11 @@ async def text_handler(m):
             else:
                 user_voice[cid] = "male" if "Erkak" in txt else "female"
             user_state[cid] = "tts"
-            await bot.send_message(cid, "✍️ Matn yuboring (o'zbek tilida):")
+            hint = ""
+            if not await run_in_thread(premium.is_premium, user_id):
+                hint = (f"\n\nℹ️ Bepul tarif: {premium.FREE_MAX_WORDS} so'zgacha, "
+                        f"kuniga {premium.FREE_DAILY_LIMIT} ta so'rov.")
+            await bot.send_message(cid, "✍️ Matn yuboring (o'zbek tilida):" + hint)
             return
 
         if state == "choose_voice":
@@ -467,8 +505,7 @@ async def text_handler(m):
   └─ Bugun qo'shilgan: {stats['today']}
   └─ Bu hafta qo'shilgan: {stats['week']}
 
-🔗 {firebase_status}
-{PROMO_HTML}"""
+🔗 {firebase_status}"""
             await bot.send_message(cid, stats_text, parse_mode='HTML')
             return
 
@@ -602,9 +639,20 @@ def run_ffmpeg_filter_sync(input_path, output_path, audio_filter, timeout=45):
 
 async def handle_tts(m):
     cid = m.chat.id
+    user_id = m.from_user.id
     txt = (m.text or "").strip()
     if not txt:
         return
+
+    # ===== PREMIUM / BEPUL TARIF LIMITLARI =====
+    # Admin va premium foydalanuvchilarga limit yo'q; qolganlarga: 50 so'z va kuniga 20 ta so'rov
+    is_prem = await run_in_thread(premium.is_premium, user_id)
+    if not is_prem:
+        allowed, reason = await run_in_thread(premium.check_free_limits, user_id, txt)
+        if not allowed:
+            await premium.send_limit_message(bot, cid, reason, len(txt.split()))
+            return
+
     if len(txt) > MAX_TTS_CHARS:
         await bot.send_message(cid, f"⚠️ Matn juda uzun ({len(txt)} belgi). {MAX_TTS_CHARS} belgidan oshmasin.")
         return
@@ -617,6 +665,7 @@ async def handle_tts(m):
     layer1_path = os.path.join(TEMP_DIR, f"{cid}_{uid}_venom_layer1.mp3")
     layer2_path = os.path.join(TEMP_DIR, f"{cid}_{uid}_venom_layer2.mp3")
     mixed_path = os.path.join(TEMP_DIR, f"{cid}_{uid}_venom_mixed.mp3")
+    dl_path = os.path.join(TEMP_DIR, f"dl_{cid}_{uid}.mp3")   # "Yuklab olish" tugmasi uchun nusxa
     caption_text = txt if len(txt) <= 100 else txt[:100] + "..."
     msg = None
 
@@ -675,10 +724,29 @@ async def handle_tts(m):
         await safe_edit("📤 Yuborilmoqda...", cid, msg.message_id)
         voice_emoji = "🤡" if voice_type == "funny" else "🎭" if voice_type == "venom" else "🎙️"
         # Matn HTML uchun xavfsizlantiriladi (teglar buzilmasligi uchun kesilmaydi)
-        caption = f"{voice_emoji} {html.escape(caption_text)}\n\n{PROMO_HTML}"
+        caption = f"{voice_emoji} {html.escape(caption_text)}"
+        if not is_prem:
+            # Natija tagida faqat qisqa "Bepul bilim ol" havolasi (premiumga reklama chiqmaydi)
+            caption += f"\n\n{PROMO_HTML}"
+
+        # Yuklab olish tugmasi: premium uchun ishlaydi, bepul foydalanuvchiga premium haqida xabar ko'rsatadi
+        dl_kb = types.InlineKeyboardMarkup()
+        dl_kb.add(types.InlineKeyboardButton(
+            "📥 MP3 yuklab olish" + ("" if is_prem else " 💎"),
+            callback_data=f"dl_{uid}"
+        ))
+        if is_prem:
+            shutil.copyfile(file_to_send, dl_path)
 
         with open(file_to_send, "rb") as f:
-            await bot.send_voice(cid, f, caption=caption, parse_mode='HTML')
+            await bot.send_voice(cid, f, caption=caption, parse_mode='HTML', reply_markup=dl_kb)
+
+        # Muvaffaqiyatli bajarilgan so'rovni kunlik limitga hisoblash (faqat bepul tarif)
+        if not is_prem:
+            try:
+                await run_in_thread(premium.add_usage, user_id)
+            except Exception as e:
+                logger.error(f"Usage count error: {e}")
 
         try:
             await bot.delete_message(cid, msg.message_id)
@@ -1246,9 +1314,10 @@ async def video_handler(m):
         if state == "mp3":
             output_path = os.path.join(TEMP_DIR, f"{cid}_output.mp3")
             await bot.edit_message_text("⏳ Audio ajratilmoqda...", cid, msg.message_id)
+            promo = await promo_for(m.from_user.id)   # premiumga reklama chiqmaydi
             async with video_semaphore:
                 try:
-                    await handle_video_to_mp3(cid, input_path, output_path, msg.message_id)
+                    await handle_video_to_mp3(cid, input_path, output_path, msg.message_id, promo)
                 except Exception as e:
                     logger.error(f"MP3 error: {e}")
                     await bot.edit_message_text(f"❌ Xatolik: {str(e)[:100]}", cid, msg.message_id)
@@ -1273,7 +1342,7 @@ async def video_handler(m):
 async def run_ffmpeg_async(cmd):
     return await run_in_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=300)
 
-async def handle_video_to_mp3(cid, input_path, output_path, msg_id):
+async def handle_video_to_mp3(cid, input_path, output_path, msg_id, promo=""):
     try:
         await bot.edit_message_text("⚡ MP3 yaratilmoqda...", cid, msg_id)
         cmd = [
@@ -1290,9 +1359,12 @@ async def handle_video_to_mp3(cid, input_path, output_path, msg_id):
             await bot.edit_message_text("❌ Audio fayl yaratilmadi.", cid, msg_id)
             return
         await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
+        caption = "✅ Video dan MP3"
+        if promo:
+            caption += f"\n\n{promo}"
         with open(output_path, "rb") as f:
             await bot.send_audio(cid, f, title="Video Audio", performer="Zikra",
-                                 caption=f"✅ Video dan MP3\n\n{PROMO_HTML}", parse_mode='HTML',
+                                 caption=caption, parse_mode='HTML',
                                  reply_markup=main_menu())
         await bot.delete_message(cid, msg_id)
         safe_remove(input_path)
@@ -1498,6 +1570,13 @@ async def main():
     except Exception as e:
         print(f"⚠️ [0/5] Firebase xato: {e}")
 
+    # 0b. Premium bazasi (Firebase'dan keyin: kerak bo'lsa premiumlarni Firebase'dan tiklaydi)
+    try:
+        await run_in_thread(premium.init_db)
+        print("✅ Premium bazasi tayyor!")
+    except Exception as e:
+        print(f"⚠️ Premium baza xato: {e}")
+
     # 1. Remove webhook
     print("[1/5] Webhook tozalanyapti...")
     try:
@@ -1527,6 +1606,7 @@ async def main():
     asyncio.create_task(auto_post_loop())
     asyncio.create_task(video_queue_worker())
     asyncio.create_task(periodic_temp_cleanup())
+    asyncio.create_task(premium.reminder_loop(bot))   # premium tugashiga 1 kun qolganda eslatma
     print("✅ [4/5] Background tasks tayyor!")
 
     print("🔥 BOT POLLING BOSHLANDI")
