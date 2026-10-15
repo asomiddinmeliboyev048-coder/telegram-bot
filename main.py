@@ -11,6 +11,7 @@ import time
 import sys
 import sqlite3
 import uuid
+import html
 import random
 from pathlib import Path
 from functools import wraps
@@ -46,6 +47,14 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 CHANNEL = int(os.getenv("CHANNEL_ID", "-1003877967882"))
 OWNER_ID = int(os.getenv("OWNER_ID", "7171330738"))
+
+# ================= REKLAMA (PROMO) =================
+PROMO_URL = "https://zikra01.vercel.app"
+PROMO_HTML = (
+    f'🔗 <a href="{PROMO_URL}">Zikra — bilimlaringizni o\'zaro bepul almashing! '
+    f'Qurilmangizga o\'rnatib oling, ro\'yxatdan o\'tib kerakli maydonlarni to\'ldiring '
+    f'va ko\'nikmalaringizni bepul almashing: sen menga o\'rgat, men senga o\'rgataman.</a>'
+)
 CIRCLE_SIZE = 320
 
 # Use Render disk or system temp
@@ -355,7 +364,7 @@ async def stat_cmd(m):
   └─ Bu hafta qo'shilgan: {stats['week']}
 
 🔗 {firebase_status}
-✅ @foyda1ii_bot"""
+{PROMO_HTML}"""
             await bot.send_message(m.chat.id, stats_text, parse_mode='HTML')
         else:
             await bot.send_message(m.chat.id, "❌ Bu komanda faqat admin uchun!")
@@ -459,7 +468,7 @@ async def text_handler(m):
   └─ Bu hafta qo'shilgan: {stats['week']}
 
 🔗 {firebase_status}
-✅ @foyda1ii_bot"""
+{PROMO_HTML}"""
             await bot.send_message(cid, stats_text, parse_mode='HTML')
             return
 
@@ -602,8 +611,6 @@ async def handle_tts(m):
 
     voice_type = user_voice.get(cid, "female")
     voice = TTS_VOICES.get(voice_type, TTS_VOICES["female"])
-    MAX_CAPTION = 900
-
     uid = uuid.uuid4().hex[:8]   # bir vaqtda kelgan xabarlar fayllari to'qnashmasligi uchun
     input_path = os.path.join(TEMP_DIR, f"{cid}_{uid}_tts_input.mp3")
     output_path = os.path.join(TEMP_DIR, f"{cid}_{uid}_tts_output.mp3")
@@ -667,12 +674,11 @@ async def handle_tts(m):
 
         await safe_edit("📤 Yuborilmoqda...", cid, msg.message_id)
         voice_emoji = "🤡" if voice_type == "funny" else "🎭" if voice_type == "venom" else "🎙️"
-        caption = f"{voice_emoji} {caption_text}\n✅ @foyda1ii_bot"
-        if len(caption) > MAX_CAPTION:
-            caption = f"{voice_emoji} {caption_text[:50]}...\n✅ @foyda1ii_bot"
+        # Matn HTML uchun xavfsizlantiriladi (teglar buzilmasligi uchun kesilmaydi)
+        caption = f"{voice_emoji} {html.escape(caption_text)}\n\n{PROMO_HTML}"
 
         with open(file_to_send, "rb") as f:
-            await bot.send_voice(cid, f, caption=caption[:MAX_CAPTION])
+            await bot.send_voice(cid, f, caption=caption, parse_mode='HTML')
 
         try:
             await bot.delete_message(cid, msg.message_id)
@@ -995,7 +1001,8 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
                     cid, f,
                     title=track.get('name', 'Music') if track else 'Music',
                     performer=track.get('artist', 'YouTube') if track else 'YouTube',
-                    caption=f"🎵 YouTube Music\n⚡ Keshdan\n✅ @foyda1ii_bot",
+                    caption=f"🎵 YouTube Music\n⚡ Keshdan\n\n{PROMO_HTML}",
+                    parse_mode='HTML',
                     reply_markup=main_menu()
                 )
             await bot.delete_message(cid, msg_id)
@@ -1160,7 +1167,8 @@ async def download_youtube_audio_fast(cid, youtube_id, url, msg_id, track=None):
                 title=title,
                 performer=uploader,
                 duration=duration,
-                caption=f"🎵 {uploader} - {title}\n✅ @foyda1ii_bot",
+                caption=f"🎵 {html.escape(str(uploader))[:100]} - {html.escape(str(title))[:150]}\n\n{PROMO_HTML}",
+                parse_mode='HTML',
                 reply_markup=main_menu()
             )
         await bot.delete_message(cid, msg_id)
@@ -1283,8 +1291,9 @@ async def handle_video_to_mp3(cid, input_path, output_path, msg_id):
             return
         await bot.edit_message_text("📤 Yuborilmoqda...", cid, msg_id)
         with open(output_path, "rb") as f:
-            await bot.send_audio(cid, f, title="Video Audio", performer="@foyda1ii_bot",
-                                 caption="✅ Video dan MP3\n✅ @foyda1ii_bot", reply_markup=main_menu())
+            await bot.send_audio(cid, f, title="Video Audio", performer="Zikra",
+                                 caption=f"✅ Video dan MP3\n\n{PROMO_HTML}", parse_mode='HTML',
+                                 reply_markup=main_menu())
         await bot.delete_message(cid, msg_id)
         safe_remove(input_path)
         safe_remove(output_path)
