@@ -434,17 +434,34 @@ async def text_handler(m):
         return
 
     try:
-        # Havola (link) tekshiruvi
-        if txt.startswith(('http://', 'https://', 'www.', 'youtube.com', 'youtu.be')):
+        # Havola yuborilganini aniqlash: matn ichidagi URL va Telegram link entity'lari
+        import re
+        has_url_entity = any(
+            getattr(entity, "type", "") in ("url", "text_link")
+            for entity in (getattr(m, "entities", None) or [])
+        )
+        has_url_text = bool(re.search(
+            r"(https?://|www\\.|t\\.me/|youtu\\.be/|instagram\\.com/|tiktok\\.com/)",
+            txt,
+            flags=re.IGNORECASE
+        ))
+        if has_url_entity or has_url_text:
             kb = types.InlineKeyboardMarkup()
-            kb.add(types.InlineKeyboardButton("🎬 Video → MP3", callback_data="show_video_mp3"))
+            kb.add(types.InlineKeyboardButton(
+                "📥 Havolani yuklab olish — @Savedinstabor_bot",
+                url="https://t.me/Savedinstabor_bot"
+            ))
             await bot.send_message(
                 cid,
-                "⚠️ <b>Eslatma:</b> Hurmatli foydalanuvchi, bizning botimiz havoladan to'g'ridan-to'g'ri video yuklab bermaydi. "
-                "Botimiz havoladagi videoni faqat audio (MP3) shaklida taqdim eta oladi. "
-                "Buning uchun pastdagi tegishli tugmani bosing.",
+                "🔗 <b>Havola orqali video yoki media yuklab olmoqchimisiz?</b>\\n\\n"
+                "Bu xizmat endi alohida botimizda ishlaydi. Havolani nusxalab, "
+                "<b>@Savedinstabor_bot</b> botiga yuboring. U yerda havola orqali "
+                "media yuklab olishingiz mumkin.\\n\\n"
+                "🎤 Matnni ovozga aylantirish va Telegram'ga video yuborib MP3 "
+                "ajratish xizmatlari esa shu botda qoladi.",
                 parse_mode='HTML',
-                reply_markup=kb
+                reply_markup=kb,
+                disable_web_page_preview=True
             )
             return
 
