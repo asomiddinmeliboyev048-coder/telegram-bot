@@ -441,7 +441,7 @@ async def text_handler(m):
             for entity in (getattr(m, "entities", None) or [])
         )
         has_url_text = bool(re.search(
-            r"(https?://|www\\.|t\\.me/|youtu\\.be/|instagram\\.com/|tiktok\\.com/)",
+            r"(https?://|www\.|t\.me/|youtu\.be/|instagram\.com/|tiktok\.com/)",
             txt,
             flags=re.IGNORECASE
         ))
@@ -453,10 +453,10 @@ async def text_handler(m):
             ))
             await bot.send_message(
                 cid,
-                "🔗 <b>Havola orqali video yoki media yuklab olmoqchimisiz?</b>\\n\\n"
+                "🔗 <b>Havola orqali video yoki media yuklab olmoqchimisiz?</b>\n\n"
                 "Bu xizmat endi alohida botimizda ishlaydi. Havolani nusxalab, "
                 "<b>@Savedinstabor_bot</b> botiga yuboring. U yerda havola orqali "
-                "media yuklab olishingiz mumkin.\\n\\n"
+                "media yuklab olishingiz mumkin.\n\n"
                 "🎤 Matnni ovozga aylantirish va Telegram'ga video yuborib MP3 "
                 "ajratish xizmatlari esa shu botda qoladi.",
                 parse_mode='HTML',
