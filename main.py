@@ -778,6 +778,21 @@ async def handle_tts(m):
         for p in (input_path, output_path, layer1_path, layer2_path, mixed_path):
             safe_remove(p)
 
+# ================= BROADCAST MEDIA HANDLER =================
+# Admin broadcast holatida yuborgan rasm/video/faylni ham xuddi post kabi tarqatadi.
+# Oddiy foydalanuvchilarning media xabarlari bu handler tomonidan ushlanmaydi.
+@bot.message_handler(
+    content_types=['photo', 'video', 'document', 'animation', 'audio', 'voice'],
+    func=lambda m: m.from_user.id == OWNER_ID and user_state.get(m.chat.id) == "broadcast"
+)
+async def broadcast_media_handler(m):
+    try:
+        await handle_broadcast(m)
+    except Exception as e:
+        logger.error(f"Broadcast media handler error: {e}")
+        await bot.send_message(m.chat.id, f"❌ Media post yuborishda xatolik: {str(e)[:150]}")
+
+
 # ================= BROADCAST =================
 async def handle_broadcast(m):
     cid = m.chat.id
