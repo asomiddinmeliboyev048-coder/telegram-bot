@@ -434,6 +434,11 @@ async def text_handler(m):
         return
 
     try:
+        # Admin broadcast matni URL bo'lsa ham avval broadcast sifatida qayta ishlanadi.
+        if state == "broadcast" and user_id == OWNER_ID:
+            await handle_broadcast(m)
+            return
+
         # Havola yuborilganini aniqlash: matn ichidagi URL va Telegram link entity'lari
         import re
         has_url_entity = any(
