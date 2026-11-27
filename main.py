@@ -1614,13 +1614,23 @@ async def main():
     except Exception as e:
         print(f"⚠️ Premium baza xato: {e}")
 
-    # 1. Remove webhook
+    # 1. Webhookni o'chirish va pollingdan oldin holatini tekshirish
+    # Kutilayotgan update'larni saqlaymiz.
     print("[1/5] Webhook tozalanyapti...")
     try:
-        await bot.remove_webhook(drop_pending_updates=True)
-        print("✅ [1/5] Webhook tozalandi!")
+        await bot.remove_webhook(drop_pending_updates=False)
+        webhook_info = await bot.get_webhook_info()
+        if webhook_info.url:
+            raise RuntimeError(
+                f"Webhook hali faol: {webhook_info.url}. "
+                "Telegram pollingni webhook bilan bir vaqtda ishlatmaydi."
+            )
+        print("✅ [1/5] Webhook o'chirilgani tasdiqlandi!")
     except Exception as e:
-        print(f"⚠️ [1/5] Webhook xato: {e}")
+        logger.exception("Webhookni o'chirish/tekshirish muvaffaqiyatsiz")
+        raise RuntimeError(
+            "Webhook o'chmadi. Polling xavfsizlik uchun boshlanmadi."
+        ) from e
 
     # 2. Flask server
     print("[2/5] Flask server ishga tushirilmoqda...")
@@ -1653,7 +1663,15 @@ async def main():
         try:
             await bot.infinity_polling(skip_pending=True, timeout=60, request_timeout=60)
         except Exception as e:
+            error_text = str(e).lower()
             logger.error(f"❌ Polling error: {e}")
+            if "409" in error_text or "conflict" in error_text or "webhook" in error_text:
+                logger.critical(
+                    "Telegram 409/Webhook conflict. Polling qayta-qayta "
+                    "ishga tushirilmaydi. Render'da shu BOT_TOKEN ishlatayotgan "
+                    "boshqa service/instance bor-yo'qligini tekshiring."
+                )
+                raise
             print(f"⚠️ Polling xato: {e}, 5 soniyadan keyin qayta uriniladi...")
             await asyncio.sleep(5)
 
