@@ -1618,7 +1618,7 @@ async def main():
     # Kutilayotgan update'larni saqlaymiz.
     print("[1/5] Webhook tozalanyapti...")
     try:
-        await bot.remove_webhook(drop_pending_updates=False)
+        await bot.delete_webhook(drop_pending_updates=False)
         webhook_info = await bot.get_webhook_info()
         if webhook_info.url:
             raise RuntimeError(
